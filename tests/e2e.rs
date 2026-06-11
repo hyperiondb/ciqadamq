@@ -49,6 +49,8 @@ auto_subscribe = {auto_subscribe}
     std::fs::write(&cfg_path, cfg).unwrap();
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_ciqadamq"))
         .arg(&cfg_path)
+        .env("RUST_LOG_STYLE", "never")
+        .env("NO_COLOR", "1")
         .spawn()
         .unwrap();
     let broker = Broker { child, tcp_port, ws_port, api_port };
@@ -238,11 +240,20 @@ async fn end_to_end() {
     let resp = http
         .post(&users_url)
         .bearer_auth("test-token")
-        .json(&json!({"username": "bad/name", "userid": "u1", "password": "x"}))
+        .json(&json!({"username": "bad name", "userid": "u1", "password": "x"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "username with slash must be rejected");
+    assert_eq!(resp.status(), 400, "username with whitespace must be rejected");
+
+    let resp = http
+        .post(&users_url)
+        .bearer_auth("test-token")
+        .json(&json!({"username": "ok-name", "userid": "bad/uid", "password": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "userid with slash must be rejected");
 
     expect_rejected(broker.tcp_port, "intruder", "tok-user1", "wrong-password").await;
     expect_rejected(broker.tcp_port, "ghost", "nobody", "pw").await;

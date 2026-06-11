@@ -79,15 +79,19 @@ fn valid_segment(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+fn valid_username(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 128 && s.chars().all(|c| c.is_ascii_graphic())
+}
+
 async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>) -> Response {
-    if !valid_segment(&req.username) {
-        return bad_request("username must be 1-64 chars of [A-Za-z0-9_-]");
+    if !valid_username(&req.username) {
+        return bad_request("username must be 1-128 printable ascii chars without spaces");
     }
     if !valid_segment(&req.userid) {
         return bad_request("userid must be 1-64 chars of [A-Za-z0-9_-]");
     }
-    if req.password.is_empty() || req.password.len() > 128 {
-        return bad_request("password must be 1-128 bytes");
+    if req.password.is_empty() || req.password.len() > 512 {
+        return bad_request("password must be 1-512 bytes");
     }
     let password = req.password;
     let hash = match tokio::task::spawn_blocking(move || db::hash_password(&password)).await {

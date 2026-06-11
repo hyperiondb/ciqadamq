@@ -21,6 +21,7 @@ pub struct MqttConfig {
     pub ws_addr: SocketAddr,
     pub message_expiry_secs: u64,
     pub max_mqueue_len: usize,
+    pub busy_check: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,6 +100,7 @@ impl Default for MqttConfig {
             ws_addr: "0.0.0.0:8083".parse().unwrap(),
             message_expiry_secs: 20 * 60,
             max_mqueue_len: 1000,
+            busy_check: true,
         }
     }
 }

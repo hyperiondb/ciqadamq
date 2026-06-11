@@ -45,7 +45,7 @@ fn load_settings() -> Result<Settings> {
             Ok((h.to_string(), p.parse::<u16>()?))
         })
         .collect::<Result<Vec<_>>>()?;
-    let sub_counts = env_or("PERF_SUBS", "10,50,100,200,400")
+    let sub_counts = env_or("PERF_SUBS", "100,500,1000,2500,5000,10000")
         .split(',')
         .map(|s| s.trim().parse::<usize>().context("PERF_SUBS must be integers"))
         .collect::<Result<Vec<_>>>()?;
@@ -54,8 +54,8 @@ fn load_settings() -> Result<Settings> {
         api: env_or("PERF_API", "http://127.0.0.1:8090"),
         token: env_or("API_TOKEN", "change-me"),
         sub_counts,
-        messages: env_or("PERF_MSGS", "1000").parse()?,
-        devices_per_user: env_or("PERF_DEVICES_PER_USER", "2").parse()?,
+        messages: env_or("PERF_MSGS", "10000").parse()?,
+        devices_per_user: env_or("PERF_DEVICES_PER_USER", "1").parse()?,
         payload_size: env_or("PERF_PAYLOAD", "256").parse()?,
         out: env_or("PERF_OUT", "perf-results.svg"),
     })
@@ -110,8 +110,31 @@ async fn connect_subscriber(
     latencies_tx: mpsc::UnboundedSender<u64>,
     delivered: Arc<AtomicU64>,
 ) -> Result<Subscriber> {
-    let mut opts = MqttOptions::new(&client_id, &node.0, node.1);
-    opts.set_credentials(&username, "perf-pass");
+    let max_attempts = 8;
+    for attempt in 1..=max_attempts {
+        match try_connect(&node, &client_id, &username).await {
+            Ok(pair) => {
+                return finish_subscriber(pair, &client_id, &topic, latencies_tx, delivered).await;
+            }
+            Err(e) if attempt < max_attempts => {
+                if attempt >= 3 {
+                    eprintln!("{client_id} connect attempt {attempt} failed ({e}), retrying");
+                }
+                tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
+            }
+            Err(e) => return Err(e.context(format!("{client_id} gave up after {max_attempts} attempts"))),
+        }
+    }
+    unreachable!()
+}
+
+async fn try_connect(
+    node: &(String, u16),
+    client_id: &str,
+    username: &str,
+) -> Result<(AsyncClient, rumqttc::EventLoop)> {
+    let mut opts = MqttOptions::new(client_id, &node.0, node.1);
+    opts.set_credentials(username, "perf-pass");
     opts.set_keep_alive(Duration::from_secs(30));
     let (client, mut eventloop) = AsyncClient::new(opts, 128);
     timeout(Duration::from_secs(30), async {
@@ -119,18 +142,28 @@ async fn connect_subscriber(
             match eventloop.poll().await {
                 Ok(Event::Incoming(Packet::ConnAck(ack))) => {
                     if ack.code != ConnectReturnCode::Success {
-                        return Err(anyhow!("{client_id} rejected: {:?}", ack.code));
+                        return Err(anyhow!("rejected: {:?}", ack.code));
                     }
                     return Ok(());
                 }
                 Ok(_) => {}
-                Err(e) => return Err(anyhow!("{client_id} connect failed: {e}")),
+                Err(e) => return Err(anyhow!("connect failed: {e}")),
             }
         }
     })
     .await
     .context("connack timeout")??;
-    client.subscribe(&topic, QoS::AtLeastOnce).await?;
+    Ok((client, eventloop))
+}
+
+async fn finish_subscriber(
+    (client, mut eventloop): (AsyncClient, rumqttc::EventLoop),
+    client_id: &str,
+    topic: &str,
+    latencies_tx: mpsc::UnboundedSender<u64>,
+    delivered: Arc<AtomicU64>,
+) -> Result<Subscriber> {
+    client.subscribe(topic, QoS::AtLeastOnce).await?;
     timeout(Duration::from_secs(30), async {
         loop {
             match eventloop.poll().await {
@@ -291,10 +324,24 @@ async fn main() -> Result<()> {
     let max_subs = *s.sub_counts.iter().max().unwrap_or(&0);
     let max_users = (max_subs + s.devices_per_user - 1) / s.devices_per_user;
     println!("run {run_id}: provisioning {max_users} users + 1 publisher");
+    let t0 = Instant::now();
     create_user(&http, &s, &format!("tok-pub-{run_id}"), "svc-perf", true).await?;
+    let sem = Arc::new(Semaphore::new(32));
+    let mut handles = Vec::with_capacity(max_users);
     for i in 0..max_users {
-        create_user(&http, &s, &format!("tok-{run_id}-{i}"), &format!("uid-{run_id}-{i}"), false).await?;
+        let http = http.clone();
+        let s = s.clone();
+        let run_id = run_id.clone();
+        let sem = sem.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            create_user(&http, &s, &format!("tok-{run_id}-{i}"), &format!("uid-{run_id}-{i}"), false).await
+        }));
     }
+    for h in handles {
+        h.await??;
+    }
+    println!("provisioned in {:.1}s", t0.elapsed().as_secs_f64());
 
     let mut results = Vec::new();
     for &n in &s.sub_counts {
@@ -309,8 +356,20 @@ async fn main() -> Result<()> {
 
     println!("cleaning up users");
     delete_user(&http, &s, &format!("tok-pub-{run_id}")).await;
+    let sem = Arc::new(Semaphore::new(32));
+    let mut handles = Vec::with_capacity(max_users);
     for i in 0..max_users {
-        delete_user(&http, &s, &format!("tok-{run_id}-{i}")).await;
+        let http = http.clone();
+        let s = s.clone();
+        let run_id = run_id.clone();
+        let sem = sem.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            delete_user(&http, &s, &format!("tok-{run_id}-{i}")).await;
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
     }
 
     let csv_path = s.out.replace(".svg", ".csv");

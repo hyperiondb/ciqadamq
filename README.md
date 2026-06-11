@@ -18,9 +18,9 @@ Status: **in progress**
 
 **Local** PC.
 
-![CiqadaMQ performance](https://github.com/hyperiondb/ciqadamq/blob/main/performance.png?raw=true)
-
 ![CiqadaMQ performance](https://github.com/hyperiondb/ciqadamq/blob/main/perf-results.svg?raw=true)
+
+![CiqadaMQ latencies](https://github.com/hyperiondb/ciqadamq/blob/main/latencies.png?raw=true)
 
 ## Identity model (matches server-backend)
 
@@ -82,13 +82,14 @@ scripts\cluster-e2e.ps1           # compose up -> cross-node e2e -> compose down
 
 ## Performance tests
 
-With the docker cluster running:
+Beware. This tesst takes forever.
 
-```
+```bash
+docker compose up -d --build
 cargo run --release --features perf --bin perf
 ```
 
-Sweeps subscriber counts (`PERF_SUBS`, default `10,50,100,200,400`), publishing `PERF_MSGS` (default 1000) messages round-robin to the users' `chat/{userid}/m/all` topics (`PERF_DEVICES_PER_USER` devices each, spread across all 3 nodes), and measures messages/sec delivered to end users plus p50/p95/p99 end-to-end latency. Writes `perf-results.svg` (chart) and `perf-results.csv`.
+Sweeps subscriber counts (`PERF_SUBS`, default `100,500,1000,2500,5000`), publishing `PERF_MSGS` (default 10000) messages round-robin to the users' `chat/{userid}/m/all` topics (`PERF_DEVICES_PER_USER` devices each, spread across all 3 nodes), and measures messages/sec delivered to end users plus p50/p95/p99 end-to-end latency. Writes `perf-results.svg` (chart) and `perf-results.csv`.
 
 ## Configuration
 

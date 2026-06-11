@@ -2,14 +2,11 @@
 tcp_addr = "0.0.0.0:1883"
 ws_addr = "0.0.0.0:8083"
 message_expiry_secs = 1200
-max_mqueue_len = 1000
+max_mqueue_len = 100000
 
 [api]
 addr = "0.0.0.0:8090"
 internal_auth_addr = "127.0.0.1:8091"
-
-[db]
-url = "postgres://ciqadamq:ciqadamq@postgres:5432/ciqadamq"
 
 [fanout]
 auto_subscribe = false

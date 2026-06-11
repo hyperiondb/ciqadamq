@@ -52,10 +52,13 @@ async fn main() -> Result<()> {
     });
     log::info!("internal auth endpoint listening on {}", cfg.api.internal_auth_addr);
 
-    let mut scx_builder = ServerContext::new().node_id(cfg.cluster.node_id).plugins_config_map_add(
-        "rmqtt-auth-http",
-        auth_http_plugin_config(&cfg.api.internal_auth_addr, cfg.acl.enabled),
-    );
+    let mut scx_builder = ServerContext::new()
+        .node_id(cfg.cluster.node_id)
+        .busy_check_enable(cfg.mqtt.busy_check)
+        .plugins_config_map_add(
+            "rmqtt-auth-http",
+            auth_http_plugin_config(&cfg.api.internal_auth_addr, cfg.acl.enabled),
+        );
     if cfg.cluster.enabled {
         scx_builder = scx_builder
             .plugins_config_map_add("rmqtt-cluster-raft", cluster_raft_plugin_config(&cfg.cluster));
