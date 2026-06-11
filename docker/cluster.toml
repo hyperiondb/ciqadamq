@@ -1,0 +1,30 @@
+[mqtt]
+tcp_addr = "0.0.0.0:1883"
+ws_addr = "0.0.0.0:8083"
+message_expiry_secs = 1200
+max_mqueue_len = 1000
+
+[api]
+addr = "0.0.0.0:8090"
+internal_auth_addr = "127.0.0.1:8091"
+
+[db]
+url = "postgres://ciqadamq:ciqadamq@postgres:5432/ciqadamq"
+
+[fanout]
+auto_subscribe = false
+qos = 1
+
+[acl]
+enabled = true
+publish_topics = ["chatsync", "updates"]
+fanout_prefixes = ["fanout"]
+admin_prefixes = ["adminfanout"]
+
+[cluster]
+enabled = true
+grpc_laddr = "0.0.0.0:5363"
+raft_laddr = "0.0.0.0:6003"
+node_grpc_addrs = ["1@node1:5363", "2@node2:5363", "3@node3:5363"]
+raft_peer_addrs = ["1@node1:6003", "2@node2:6003", "3@node3:6003"]
+leader_id = 1

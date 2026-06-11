@@ -1,0 +1,87 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ciqadamq
+      POSTGRES_PASSWORD: ciqadamq
+      POSTGRES_DB: ciqadamq
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ciqadamq"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  node1:
+    build: .
+    image: ciqadamq
+    command: ["cluster.toml"]
+    environment:
+      NODE_ID: "1"
+      API_TOKEN: ${API_TOKEN:-change-me}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./docker/cluster.toml:/app/cluster.toml:ro
+    ports:
+      - "1883:1883"
+      - "8083:8083"
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1883"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+
+  node2:
+    image: ciqadamq
+    command: ["cluster.toml"]
+    environment:
+      NODE_ID: "2"
+      API_TOKEN: ${API_TOKEN:-change-me}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./docker/cluster.toml:/app/cluster.toml:ro
+    ports:
+      - "1884:1883"
+      - "8084:8083"
+      - "8091:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1883"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+
+  node3:
+    image: ciqadamq
+    command: ["cluster.toml"]
+    environment:
+      NODE_ID: "3"
+      API_TOKEN: ${API_TOKEN:-change-me}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./docker/cluster.toml:/app/cluster.toml:ro
+    ports:
+      - "1885:1883"
+      - "8085:8083"
+      - "8092:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/1883"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped
+
+volumes:
+  pgdata:

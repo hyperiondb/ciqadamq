@@ -1,0 +1,102 @@
+# ciqadamq
+
+Clustered MQTT broker built on [RMQTT](https://github.com/rmqtt/rmqtt) (embedded as a library) with a built-in REST API for user management. Designed as a drop-in replacement for the RabbitMQ MQTT setup in `Weido/server-backend`.
+
+Status: **in progress**
+
+## Features
+
+- MQTT 3.1 / 3.1.1 / 5.0 over TCP (`1883`) and WebSocket (`8083`, path-agnostic, e.g. `ws://host:8083/mqtt`)
+- 3-node clustering via the official `rmqtt-cluster-raft` plugin (subscription table replicated by raft, publishes forwarded only to nodes with matching subscribers)
+- Username/password auth via the official `rmqtt-auth-http` plugin against a loopback endpoint backed by SQLite (dev) or PostgreSQL (cluster), argon2 password hashing
+- Per-user topic ACL mirroring the RabbitMQ permission regexes
+- REST API to create/delete users (bearer token)
+- Messages queued for offline persistent sessions expire after 20 minutes (configurable)
+- No TLS — run behind HAProxy
+
+## Performance
+
+**Local** PC.
+
+![CiqadaMQ performance](https://github.com/hyperiondb/ciqadamq/blob/main/performance.png?raw=true)
+
+![CiqadaMQ performance](https://github.com/hyperiondb/ciqadamq/blob/main/perf-results.svg?raw=true)
+
+## Identity model (matches server-backend)
+
+| Concept | Meaning |
+|---|---|
+| `username` | per-user MQTT login token (random, e.g. `getToken(24)` hex), created via REST API |
+| `userid` | the application user id (Mongo ObjectId) — appears in topics |
+| `clientid` | per-connection id chosen by the device |
+| `superuser` | backend service account; bypasses all ACL |
+| `admin` | may subscribe to `adminfanout/...` |
+
+## Topics and ACL
+
+Non-superuser clients may:
+
+- subscribe to any topic whose **second** segment is their own `userid`: `chat/{userid}/m/all`, `update/{userid}/{device}/all`, `+/{userid}/#` …
+- subscribe to `fanout/...` (everyone) and `adminfanout/...` (admins)
+- publish only to `chatsync` and `updates` (configurable allowlist)
+
+Superusers (the backend) may publish/subscribe anywhere. ACL decisions for publishing are cached per connection (`X-Cache: -1`).
+
+Fanout works exactly like the RabbitMQ setup: one publish to `chat/{userid}/m/all` reaches every device of that user subscribed to it; `fanout/all` reaches everyone. Optionally `fanout.auto_subscribe = true` makes the broker subscribe every connecting client to `+/{userid}/#` plus the fanout topics server-side (leave off if clients subscribe themselves, or they will receive duplicates).
+
+## REST API
+
+`Authorization: Bearer <token>` (config `api.token` / env `API_TOKEN`). Any node of the cluster can serve these (shared Postgres).
+
+| Method | Path | Body |
+|---|---|---|
+| POST | `/api/v1/users` | `{"username", "userid", "password", "superuser"?: bool, "admin"?: bool}` → `201`/`409` |
+| DELETE | `/api/v1/users/{username}` | → `204`/`404` |
+| GET | `/api/v1/users` | → `{"users": [{username, userid, superuser, admin}]}` |
+| GET | `/health` | no auth |
+
+## Running
+
+Single node (SQLite):
+
+```
+cargo run --release             # uses ./config.toml
+```
+
+3-node cluster + Postgres:
+
+```
+docker compose up -d --build
+```
+
+Node N is reachable at MQTT `188(2+N)`, WS `808(2+N)`, API `809(N-1)` … i.e. node1: 1883/8083/8090, node2: 1884/8084/8091, node3: 1885/8085/8092. Internal ports 5363 (gRPC forwarding) and 6003 (raft) stay on the compose network. Point HAProxy at the three MQTT/WS ports.
+
+Note: building needs `protoc` (`apt install protobuf-compiler`, or `winget install Google.Protobuf` + `PROTOC` env var on Windows).
+
+## Tests
+
+```
+cargo test                        # local single-broker e2e (auth, ACL, fanout, ws, expiry)
+scripts\cluster-e2e.ps1           # compose up -> cross-node e2e -> compose down (KEEP_CLUSTER=1 to keep it)
+```
+
+## Performance tests
+
+With the docker cluster running:
+
+```
+cargo run --release --features perf --bin perf
+```
+
+Sweeps subscriber counts (`PERF_SUBS`, default `10,50,100,200,400`), publishing `PERF_MSGS` (default 1000) messages round-robin to the users' `chat/{userid}/m/all` topics (`PERF_DEVICES_PER_USER` devices each, spread across all 3 nodes), and measures messages/sec delivered to end users plus p50/p95/p99 end-to-end latency. Writes `perf-results.svg` (chart) and `perf-results.csv`.
+
+## Configuration
+
+See `config.toml` (single node) and `docker/cluster.toml` (cluster). Env overrides: `API_TOKEN`, `DB_URL`, `NODE_ID`, `RUST_LOG`.
+
+Notes:
+
+- `db.url`: `sqlite://path` or `postgres://user:pass@host/db`
+- message expiry applies to messages queued for offline persistent sessions (`clean_session=false`); sessions themselves persist 2h (rmqtt default)
+- offline queues live in broker memory: they survive reconnects and migrate between nodes on session takeover, but not a node crash (add rmqtt-session/message-storage with Redis if that matters)
+- retained messages are not enabled (cluster-wide retain requires the Redis retainer plugin)
