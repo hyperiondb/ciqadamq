@@ -16,11 +16,9 @@ Status: **in progress**
 
 ## Performance
 
-**Local** PC.
+**Local** PC data. Beware, it takes long time.
 
 ![CiqadaMQ performance](https://github.com/hyperiondb/ciqadamq/blob/main/perf-results.svg?raw=true)
-
-![CiqadaMQ latencies](https://github.com/hyperiondb/ciqadamq/blob/main/latencies.png?raw=true)
 
 ## Identity model (matches server-backend)
 
