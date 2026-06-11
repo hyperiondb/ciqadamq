@@ -2,6 +2,24 @@
 name = "ciqadamq"
 version = "0.1.0"
 edition = "2024"
+description = "Clustered MQTT broker built on RMQTT with a REST API for user management, per-user topic ACLs, and message expiry"
+authors = ["Tadas Talaikis <talaikis.tadas@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hyperiondb/ciqadamq"
+homepage = "https://github.com/hyperiondb/ciqadamq"
+readme = "README.md"
+keywords = ["mqtt", "broker", "rmqtt", "cluster", "messaging"]
+categories = ["network-programming", "asynchronous"]
+exclude = [
+    "docker/",
+    "scripts/",
+    "docker-compose.yml",
+    "Dockerfile",
+    ".dockerignore",
+    "perf-results.*",
+    "performance.png",
+    "data/",
+]
 
 [features]
 perf = ["dep:rumqttc", "dep:reqwest"]
