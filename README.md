@@ -20,6 +20,8 @@ Status: **in progress**
 
 ![CiqadaMQ performance](https://github.com/hyperiondb/ciqadamq/blob/main/perf-results.svg?raw=true)
 
+![CiqadaMQ idle resource usage](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources.svg?raw=true)
+
 ## Identity model (matches server-backend)
 
 | Concept | Meaning |
@@ -88,6 +90,15 @@ cargo run --release --features perf --bin perf
 ```
 
 Sweeps subscriber counts (`PERF_SUBS`, default `100,500,1000,2500,5000`), publishing `PERF_MSGS` (default 10000) messages round-robin to the users' `chat/{userid}/m/all` topics (`PERF_DEVICES_PER_USER` devices each, spread across all 3 nodes), and measures messages/sec delivered to end users plus p50/p95/p99 end-to-end latency. Writes `perf-results.svg` (chart) and `perf-results.csv`.
+
+Resource usage on idle subscribers (no messages published):
+
+```bash
+docker compose up -d --build
+cargo run --release --features perf --bin perf-resources
+```
+
+Ramps connected-and-subscribed clients through `PERF_RES_SUBS` (default `0,1000,2500,5000,7500,10000`, spread across all 3 nodes) without publishing anything, then at each level waits `PERF_SETTLE_SECS` (default 10) and averages `PERF_SAMPLES` (default 3) `docker stats` readings of the broker containers (`PERF_SERVICES`, default `node1,node2,node3`). Writes `perf-resources.svg` (per-node + total CPU %, per-node + total memory MB vs subscriber count) and `perf-resources.csv`.
 
 ## Configuration
 

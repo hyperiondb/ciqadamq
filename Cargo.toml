@@ -17,6 +17,7 @@ exclude = [
     "Dockerfile",
     ".dockerignore",
     "perf-results.*",
+    "perf-resources.*",
     "performance.png",
     "data/",
 ]
@@ -31,6 +32,11 @@ path = "src/main.rs"
 [[bin]]
 name = "perf"
 path = "src/bin/perf.rs"
+required-features = ["perf"]
+
+[[bin]]
+name = "perf-resources"
+path = "src/bin/perf_resources.rs"
 required-features = ["perf"]
 
 [dependencies]

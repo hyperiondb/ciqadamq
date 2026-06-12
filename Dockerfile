@@ -1,16 +1,17 @@
-FROM rust:1.96-bookworm AS builder
+FROM rust:1.96-alpine AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static protoc protobuf-dev
+ENV OPENSSL_STATIC=1
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-FROM debian:bookworm-slim
+FROM alpine:3.23
 
-RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -s /usr/sbin/nologin ciqadamq
+RUN apk add --no-cache ca-certificates \
+    && adduser -S -s /sbin/nologin ciqadamq
 WORKDIR /app
 COPY --from=builder /build/target/release/ciqadamq /usr/local/bin/ciqadamq
 COPY config.toml ./config.toml
