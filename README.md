@@ -95,7 +95,7 @@ See `config.toml` (single node) and `docker/cluster.toml` (cluster). Env overrid
 
 Notes:
 
-- `db.url`: `sqlite://path` or `postgres://user:pass@host/db`
+- `db.url`: `sqlite://path` or `postgres://user:pass@host/db`; postgres accepts comma-separated hosts (`postgres://user:pass@h1:5432,h2:5432,h3:5432/db`) -- the broker connects to whichever node reports `pg_is_in_recovery() = false` and re-discovers the primary on failover
 - message expiry applies to messages queued for offline persistent sessions (`clean_session=false`); sessions themselves persist 2h (rmqtt default)
 - offline queues live in broker memory: they survive reconnects and migrate between nodes on session takeover, but not a node crash (add rmqtt-session/message-storage with Redis if that matters)
 - retained messages are not enabled (cluster-wide retain requires the Redis retainer plugin)

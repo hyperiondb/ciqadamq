@@ -9,6 +9,7 @@ use sqlx::{PgPool, Row};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{Mutex as TokioMutex, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct UserRecord {
@@ -170,32 +171,34 @@ fn row_to_record(r: &rusqlite::Row) -> rusqlite::Result<UserRecord> {
     })
 }
 
+fn expand_multi_host(url: &str) -> Vec<String> {
+    let Some(scheme_end) = url.find("://") else {
+        return vec![url.to_string()];
+    };
+    let (scheme, rest) = url.split_at(scheme_end + 3);
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, path) = rest.split_at(authority_end);
+    let (userinfo, hosts) = match authority.rfind('@') {
+        Some(i) => (&authority[..=i], &authority[i + 1..]),
+        None => ("", authority),
+    };
+    hosts
+        .split(',')
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("{scheme}{userinfo}{h}{path}"))
+        .collect()
+}
+
 pub struct PgStore {
-    pool: PgPool,
+    urls: Vec<String>,
+    pool: RwLock<PgPool>,
+    refresh_lock: TokioMutex<()>,
 }
 
 impl PgStore {
     pub async fn connect(url: &str) -> Result<Self> {
-        let mut last_err = None;
-        let mut pool = None;
-        for attempt in 1..=30 {
-            match PgPoolOptions::new().max_connections(8).connect(url).await {
-                Ok(p) => {
-                    pool = Some(p);
-                    break;
-                }
-                Err(e) => {
-                    if attempt % 5 == 0 {
-                        log::warn!("postgres not ready (attempt {attempt}): {e}");
-                    }
-                    last_err = Some(e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-        let pool = pool.ok_or_else(|| {
-            anyhow!("could not connect to postgres after 30 attempts: {:?}", last_err)
-        })?;
+        let urls = expand_multi_host(url);
+        let pool = Self::discover(&urls, 30).await?;
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
@@ -209,7 +212,102 @@ impl PgStore {
         .execute(&pool)
         .await
         .context("creating users table")?;
-        Ok(Self { pool })
+        Ok(Self {
+            urls,
+            pool: RwLock::new(pool),
+            refresh_lock: TokioMutex::new(()),
+        })
+    }
+
+    async fn probe(url: &str) -> Result<PgPool, sqlx::Error> {
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(url)
+            .await?;
+        let standby: bool = sqlx::query_scalar("SELECT pg_is_in_recovery()")
+            .fetch_one(&pool)
+            .await?;
+        if standby {
+            pool.close().await;
+            return Err(sqlx::Error::Configuration(
+                "node is a read-only standby".into(),
+            ));
+        }
+        Ok(pool)
+    }
+
+    async fn discover(urls: &[String], attempts: u32) -> Result<PgPool> {
+        let mut last_err = None;
+        for attempt in 1..=attempts {
+            for url in urls {
+                match Self::probe(url).await {
+                    Ok(pool) => return Ok(pool),
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            if attempt % 5 == 0 {
+                if let Some(e) = &last_err {
+                    log::warn!("no writable postgres yet (attempt {attempt}): {e}");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err(anyhow!(
+            "could not connect to a writable postgres after {attempts} attempts: {:?}",
+            last_err
+        ))
+    }
+
+    async fn pool(&self) -> PgPool {
+        self.pool.read().await.clone()
+    }
+
+    fn should_failover(e: &sqlx::Error) -> bool {
+        match e {
+            sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed => true,
+            sqlx::Error::Database(db) => {
+                matches!(db.code().as_deref(), Some("25006" | "57P01" | "57P02" | "57P03"))
+            }
+            _ => false,
+        }
+    }
+
+    async fn refresh(&self) -> Result<()> {
+        let _guard = self.refresh_lock.lock().await;
+        let current = self.pool().await;
+        if let Ok(false) = sqlx::query_scalar::<_, bool>("SELECT pg_is_in_recovery()")
+            .fetch_one(&current)
+            .await
+        {
+            return Ok(());
+        }
+        let new_pool = Self::discover(&self.urls, 3).await?;
+        let old = {
+            let mut guard = self.pool.write().await;
+            std::mem::replace(&mut *guard, new_pool)
+        };
+        old.close().await;
+        log::info!("postgres primary changed, reconnected");
+        Ok(())
+    }
+
+    async fn with_failover<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: Fn(PgPool) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, sqlx::Error>>,
+    {
+        let pool = self.pool().await;
+        match op(pool).await {
+            Ok(v) => Ok(v),
+            Err(e) if Self::should_failover(&e) => {
+                log::warn!("postgres query failed ({e}), probing for writable primary");
+                self.refresh().await?;
+                let pool = self.pool().await;
+                Ok(op(pool).await?)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -226,45 +324,105 @@ fn pg_row_to_record(r: &sqlx::postgres::PgRow) -> UserRecord {
 #[async_trait]
 impl UserStore for PgStore {
     async fn insert_user(&self, user: NewUser) -> Result<bool> {
-        let res = sqlx::query(
-            "INSERT INTO users (username, userid, password_hash, superuser, admin, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (username) DO NOTHING",
-        )
-        .bind(&user.username)
-        .bind(&user.userid)
-        .bind(&user.password_hash)
-        .bind(user.superuser)
-        .bind(user.admin)
-        .bind(now_secs())
-        .execute(&self.pool)
-        .await?;
+        let created_at = now_secs();
+        let res = self
+            .with_failover(|pool| {
+                let user = user.clone();
+                async move {
+                    sqlx::query(
+                        "INSERT INTO users (username, userid, password_hash, superuser, admin, created_at)
+                         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (username) DO NOTHING",
+                    )
+                    .bind(user.username)
+                    .bind(user.userid)
+                    .bind(user.password_hash)
+                    .bind(user.superuser)
+                    .bind(user.admin)
+                    .bind(created_at)
+                    .execute(&pool)
+                    .await
+                }
+            })
+            .await?;
         Ok(res.rows_affected() > 0)
     }
 
     async fn delete_user(&self, username: &str) -> Result<bool> {
-        let res = sqlx::query("DELETE FROM users WHERE username = $1")
-            .bind(username)
-            .execute(&self.pool)
+        let username = username.to_owned();
+        let res = self
+            .with_failover(|pool| {
+                let username = username.clone();
+                async move {
+                    sqlx::query("DELETE FROM users WHERE username = $1")
+                        .bind(username)
+                        .execute(&pool)
+                        .await
+                }
+            })
             .await?;
         Ok(res.rows_affected() > 0)
     }
 
     async fn list_users(&self) -> Result<Vec<UserRecord>> {
-        let rows = sqlx::query(
-            "SELECT username, userid, password_hash, superuser, admin FROM users ORDER BY username",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = self
+            .with_failover(|pool| async move {
+                sqlx::query(
+                    "SELECT username, userid, password_hash, superuser, admin FROM users ORDER BY username",
+                )
+                .fetch_all(&pool)
+                .await
+            })
+            .await?;
         Ok(rows.iter().map(pg_row_to_record).collect())
     }
 
     async fn get_user(&self, username: &str) -> Result<Option<UserRecord>> {
-        let row = sqlx::query(
-            "SELECT username, userid, password_hash, superuser, admin FROM users WHERE username = $1",
-        )
-        .bind(username)
-        .fetch_optional(&self.pool)
-        .await?;
+        let username = username.to_owned();
+        let row = self
+            .with_failover(|pool| {
+                let username = username.clone();
+                async move {
+                    sqlx::query(
+                        "SELECT username, userid, password_hash, superuser, admin FROM users WHERE username = $1",
+                    )
+                    .bind(username)
+                    .fetch_optional(&pool)
+                    .await
+                }
+            })
+            .await?;
         Ok(row.as_ref().map(pg_row_to_record))
+    }
+}
+
+#[cfg(test)]
+mod multi_host_tests {
+    use super::expand_multi_host;
+
+    #[test]
+    fn expands_multi_host_url() {
+        assert_eq!(
+            expand_multi_host("postgres://u:p@10.0.0.1:5432,10.0.0.2:5432/db"),
+            vec![
+                "postgres://u:p@10.0.0.1:5432/db",
+                "postgres://u:p@10.0.0.2:5432/db",
+            ]
+        );
+    }
+
+    #[test]
+    fn single_host_unchanged() {
+        assert_eq!(
+            expand_multi_host("postgres://u:p@paradedb:5432/db"),
+            vec!["postgres://u:p@paradedb:5432/db"]
+        );
+    }
+
+    #[test]
+    fn no_userinfo() {
+        assert_eq!(
+            expand_multi_host("postgres://h1:5432,h2:5432/db"),
+            vec!["postgres://h1:5432/db", "postgres://h2:5432/db"]
+        );
     }
 }
