@@ -1,6 +1,6 @@
 [package]
 name = "ciqadamq"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Clustered MQTT broker built on RMQTT with a REST API for user management, per-user topic ACLs, and message expiry"
 authors = ["Tadas Talaikis <talaikis.tadas@gmail.com>"]
@@ -63,3 +63,6 @@ toml = "1.1.2"
 portpicker = "0.1.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25.1", default-features = false, features = ["url", "websocket"] }
+
+[patch.crates-io]
+rmqtt-cluster-raft = { path = "vendor/rmqtt-cluster-raft" }

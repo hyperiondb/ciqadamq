@@ -4,6 +4,7 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static protoc
 ENV OPENSSL_STATIC=1
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
 COPY src ./src
 RUN touch src/main.rs && cargo build --release

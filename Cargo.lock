@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "ciqadamq"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3117,8 +3117,6 @@ dependencies = [
 [[package]]
 name = "rmqtt-cluster-raft"
 version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "304b24a91c749c7f6f6bfb2a30190ffa4d9ac7dd04160dfc4b9cd624e5199b0e"
 dependencies = [
  "ahash",
  "anyhow",
