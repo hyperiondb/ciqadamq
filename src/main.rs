@@ -75,7 +75,23 @@ async fn main() -> Result<()> {
             cfg.cluster.raft_laddr
         );
         scx.node.start_grpc_server(scx.clone(), cfg.cluster.grpc_laddr, true, false);
-        rmqtt_cluster_raft::register(&scx, true, true).await?;
+        let mut attempt: u32 = 0;
+        loop {
+            match rmqtt_cluster_raft::register(&scx, true, true).await {
+                Ok(()) => break,
+                Err(e) if attempt < cfg.cluster.join_max_retries => {
+                    attempt += 1;
+                    let backoff = Duration::from_secs(cfg.cluster.join_retry_secs);
+                    log::warn!(
+                        "cluster registration attempt {attempt}/{} failed: {e}; retrying in {}s",
+                        cfg.cluster.join_max_retries,
+                        backoff.as_secs()
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     if cfg.fanout.auto_subscribe {
@@ -156,8 +172,7 @@ laddr = "{raft_laddr}"
 leader_id = {leader_id}
 verify_addr = true
 try_lock_timeout = "10s"
-health.exit_on_node_unavailable = true
-health.exit_code = -1
+health.exit_on_node_unavailable = false
 raft.check_quorum = true
 raft.pre_vote = true
 "#,

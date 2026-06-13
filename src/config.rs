@@ -55,6 +55,8 @@ pub struct ClusterConfig {
     pub node_grpc_addrs: Vec<String>,
     pub raft_peer_addrs: Vec<String>,
     pub leader_id: u64,
+    pub join_max_retries: u32,
+    pub join_retry_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +91,8 @@ impl Default for ClusterConfig {
             node_grpc_addrs: Vec::new(),
             raft_peer_addrs: Vec::new(),
             leader_id: 1,
+            join_max_retries: 10,
+            join_retry_secs: 5,
         }
     }
 }

@@ -2,7 +2,7 @@
 
 Clustered MQTT broker built on [RMQTT](https://github.com/rmqtt/rmqtt) (embedded as a library) with a built-in REST API for user management. Designed as a drop-in replacement for the RabbitMQ MQTT setup.
 
-Status: **in progress**
+Status: **in production**
 
 ## Features
 
