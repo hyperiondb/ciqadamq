@@ -162,7 +162,7 @@ impl ClusterPlugin {
                 log::info!("Specify a leader: {leader_info:?}");
                 if id == leader_info.id {
                     //First, check if the Leader exists.
-                    let actual_leader_info = find_actual_leader(&raft, peer_addrs, 3).await?;
+                    let actual_leader_info = find_actual_leader(&raft, peer_addrs, 30).await?;
                     if actual_leader_info.is_some() {
                         log::info!("Leader already exists, {actual_leader_info:?}");
                     }
