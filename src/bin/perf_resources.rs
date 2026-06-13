@@ -2,10 +2,12 @@ use anyhow::{anyhow, Context, Result};
 use rumqttc::{AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 #[derive(Clone)]
@@ -18,6 +20,8 @@ struct Settings {
     services: Vec<String>,
     settle_secs: u64,
     samples: usize,
+    msg_rate: u32,
+    payload_size: usize,
     out: String,
 }
 
@@ -28,6 +32,12 @@ struct LevelResult {
     mem_mb: Vec<f64>,
     cpu_total_pct: f64,
     mem_total_mb: f64,
+}
+
+struct Scenario {
+    tag: &'static str,
+    label: String,
+    qos: Option<QoS>,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -61,6 +71,8 @@ fn load_settings() -> Result<Settings> {
         services,
         settle_secs: env_or("PERF_SETTLE_SECS", "10").parse()?,
         samples: env_or("PERF_SAMPLES", "3").parse()?,
+        msg_rate: env_or("PERF_RES_MSG_RATE", "10").parse()?,
+        payload_size: env_or("PERF_RES_PAYLOAD", "64").parse()?,
         out: env_or("PERF_RES_OUT", "perf-resources.svg"),
     })
 }
@@ -82,7 +94,7 @@ async fn create_user(
             "username": username,
             "userid": userid,
             "password": "perf-pass",
-            "superuser": false
+            "superuser": true
         }))
         .send()
         .await?;
@@ -103,6 +115,7 @@ async fn delete_user(http: &reqwest::Client, s: &Settings, username: &str) {
 
 struct Subscriber {
     client: AsyncClient,
+    topic: String,
 }
 
 async fn connect_subscriber(
@@ -188,7 +201,38 @@ async fn finish_subscriber(
             }
         }
     });
-    Ok(Subscriber { client })
+    Ok(Subscriber { client, topic: topic.to_string() })
+}
+
+fn spawn_publishers(
+    subs: &[Subscriber],
+    qos: QoS,
+    rate: u32,
+    payload: Arc<Vec<u8>>,
+    running: Arc<AtomicBool>,
+) -> Vec<JoinHandle<()>> {
+    subs.iter()
+        .map(|sub| {
+            let client = sub.client.clone();
+            let topic = sub.topic.clone();
+            let payload = payload.clone();
+            let running = running.clone();
+            tokio::spawn(async move {
+                let period = Duration::from_micros(1_000_000 / rate.max(1) as u64);
+                let mut ticker = tokio::time::interval(period);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                while running.load(Ordering::Relaxed) {
+                    ticker.tick().await;
+                    if !running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if client.publish(topic.clone(), qos, false, payload.as_ref().clone()).await.is_err() {
+                        break;
+                    }
+                }
+            })
+        })
+        .collect()
 }
 
 async fn resolve_containers(services: &[String]) -> Result<Vec<String>> {
@@ -287,12 +331,49 @@ async fn measure_level(s: &Settings, ids: &[String], subscribers: usize) -> Resu
     })
 }
 
+async fn measure_scenario(
+    s: &Settings,
+    ids: &[String],
+    subs: &[Subscriber],
+    subscribers: usize,
+    qos: Option<QoS>,
+) -> Result<LevelResult> {
+    let running = Arc::new(AtomicBool::new(true));
+    let handles = match qos {
+        Some(q) => {
+            let payload = Arc::new(vec![b'x'; s.payload_size]);
+            spawn_publishers(subs, q, s.msg_rate, payload, running.clone())
+        }
+        None => Vec::new(),
+    };
+    let result = measure_level(s, ids, subscribers).await;
+    running.store(false, Ordering::Relaxed);
+    for h in handles {
+        let _ = h.await;
+    }
+    result
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let s = load_settings()?;
     let ids = resolve_containers(&s.services).await?;
     let http = reqwest::Client::new();
     let run_id = format!("{:x}", now_nanos() / 1_000_000);
+
+    let scenarios = [
+        Scenario { tag: "idle", label: "idle subscribers".to_string(), qos: None },
+        Scenario {
+            tag: "qos1",
+            label: format!("subscribers sending {} msg/s qos1", s.msg_rate),
+            qos: Some(QoS::AtLeastOnce),
+        },
+        Scenario {
+            tag: "qos2",
+            label: format!("subscribers sending {} msg/s qos2", s.msg_rate),
+            qos: Some(QoS::ExactlyOnce),
+        },
+    ];
 
     let max_subs = *s.sub_levels.iter().max().unwrap_or(&0);
     let max_users = if max_subs == 0 { 0 } else { (max_subs + s.devices_per_user - 1) / s.devices_per_user };
@@ -316,10 +397,10 @@ async fn main() -> Result<()> {
     println!("provisioned in {:.1}s", t0.elapsed().as_secs_f64());
 
     let mut subs: Vec<Subscriber> = Vec::new();
-    let mut results = Vec::new();
+    let mut results: Vec<Vec<LevelResult>> = scenarios.iter().map(|_| Vec::new()).collect();
     for &level in &s.sub_levels {
         if level > subs.len() {
-            println!("ramping to {level} idle subscribers...");
+            println!("ramping to {level} subscribers...");
             let sem = Arc::new(Semaphore::new(32));
             let mut handles = Vec::with_capacity(level - subs.len());
             for i in subs.len()..level {
@@ -338,19 +419,21 @@ async fn main() -> Result<()> {
                 subs.push(h.await??);
             }
         }
-        let r = measure_level(&s, &ids, level).await?;
-        let per_node = s
-            .services
-            .iter()
-            .zip(r.cpu_pct.iter().zip(r.mem_mb.iter()))
-            .map(|(svc, (c, m))| format!("{svc} {c:.1}%/{m:.0}MB"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!(
-            "  {} subscribers -> cpu {:.1}% mem {:.1} MB ({per_node})",
-            r.subscribers, r.cpu_total_pct, r.mem_total_mb
-        );
-        results.push(r);
+        for (si, scenario) in scenarios.iter().enumerate() {
+            let r = measure_scenario(&s, &ids, &subs, level, scenario.qos).await?;
+            let per_node = s
+                .services
+                .iter()
+                .zip(r.cpu_pct.iter().zip(r.mem_mb.iter()))
+                .map(|(svc, (c, m))| format!("{svc} {c:.1}%/{m:.0}MB"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  [{}] {} subscribers -> cpu {:.1}% mem {:.1} MB ({per_node})",
+                scenario.tag, r.subscribers, r.cpu_total_pct, r.mem_total_mb
+            );
+            results[si].push(r);
+        }
     }
 
     for sub in &subs {
@@ -374,26 +457,33 @@ async fn main() -> Result<()> {
         let _ = h.await;
     }
 
-    let csv_path = s.out.replace(".svg", ".csv");
-    let mut csv = String::from("subscribers");
-    for svc in &s.services {
-        csv.push_str(&format!(",{svc}_cpu_pct,{svc}_mem_mb"));
-    }
-    csv.push_str(",total_cpu_pct,total_mem_mb\n");
-    for r in &results {
-        csv.push_str(&r.subscribers.to_string());
-        for i in 0..s.services.len() {
-            csv.push_str(&format!(",{:.2},{:.2}", r.cpu_pct[i], r.mem_mb[i]));
+    for (scenario, res) in scenarios.iter().zip(results.iter()) {
+        let svg_path = if scenario.tag == "idle" {
+            s.out.clone()
+        } else {
+            s.out.replace(".svg", &format!("-{}.svg", scenario.tag))
+        };
+        let csv_path = svg_path.replace(".svg", ".csv");
+        let mut csv = String::from("subscribers");
+        for svc in &s.services {
+            csv.push_str(&format!(",{svc}_cpu_pct,{svc}_mem_mb"));
         }
-        csv.push_str(&format!(",{:.2},{:.2}\n", r.cpu_total_pct, r.mem_total_mb));
+        csv.push_str(",total_cpu_pct,total_mem_mb\n");
+        for r in res {
+            csv.push_str(&r.subscribers.to_string());
+            for i in 0..s.services.len() {
+                csv.push_str(&format!(",{:.2},{:.2}", r.cpu_pct[i], r.mem_mb[i]));
+            }
+            csv.push_str(&format!(",{:.2},{:.2}\n", r.cpu_total_pct, r.mem_total_mb));
+        }
+        std::fs::write(&csv_path, csv)?;
+        std::fs::write(&svg_path, render_svg(&s.services, res, &scenario.label))?;
+        println!("wrote {svg_path} and {csv_path}");
     }
-    std::fs::write(&csv_path, csv)?;
-    std::fs::write(&s.out, render_svg(&s.services, &results))?;
-    println!("wrote {} and {}", s.out, csv_path);
     Ok(())
 }
 
-fn render_svg(services: &[String], results: &[LevelResult]) -> String {
+fn render_svg(services: &[String], results: &[LevelResult], label: &str) -> String {
     let node_colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2"];
     let mut cpu_series: Vec<(String, &str, Vec<f64>)> = Vec::new();
     let mut mem_series: Vec<(String, &str, Vec<f64>)> = Vec::new();
@@ -425,10 +515,10 @@ fn render_svg(services: &[String], results: &[LevelResult]) -> String {
     ));
     svg.push_str(&format!(r#"<rect width="{w}" height="{h}" fill="white"/>"#));
 
-    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] = [
-        ("broker cpu usage on idle subscribers (%, docker stats)", &cpu_series),
-        ("broker memory usage on idle subscribers (MB)", &mem_series),
-    ];
+    let cpu_title = format!("broker cpu usage on {label} (%, docker stats)");
+    let mem_title = format!("broker memory usage on {label} (MB)");
+    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] =
+        [(cpu_title.as_str(), &cpu_series), (mem_title.as_str(), &mem_series)];
 
     for (panel_idx, (title, series)) in panels.iter().enumerate() {
         let top = mt + panel_idx as f64 * (panel_h + gap - mt);

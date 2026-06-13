@@ -22,6 +22,10 @@ Status: **in progress**
 
 ![CiqadaMQ idle resource usage](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources.svg?raw=true)
 
+![CiqadaMQ resource usage, 10 msg/s QoS 1](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-qos1.svg?raw=true)
+
+![CiqadaMQ resource usage, 10 msg/s QoS 2](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-qos2.svg?raw=true)
+
 ## Identity model (matches server-backend)
 
 | Concept | Meaning |
@@ -91,14 +95,14 @@ cargo run --release --features perf --bin perf
 
 Sweeps subscriber counts (`PERF_SUBS`, default `100,500,1000,2500,5000`), publishing `PERF_MSGS` (default 10000) messages round-robin to the users' `chat/{userid}/m/all` topics (`PERF_DEVICES_PER_USER` devices each, spread across all 3 nodes), and measures messages/sec delivered to end users plus p50/p95/p99 end-to-end latency. Writes `perf-results.svg` (chart) and `perf-results.csv`.
 
-Resource usage on idle subscribers (no messages published):
+Resource usage as subscribers scale, measured idle and under per-subscriber publish load:
 
 ```bash
 docker compose up -d --build
 cargo run --release --features perf --bin perf-resources
 ```
 
-Ramps connected-and-subscribed clients through `PERF_RES_SUBS` (default `0,1000,2500,5000,7500,10000`, spread across all 3 nodes) without publishing anything, then at each level waits `PERF_SETTLE_SECS` (default 10) and averages `PERF_SAMPLES` (default 3) `docker stats` readings of the broker containers (`PERF_SERVICES`, default `node1,node2,node3`). Writes `perf-resources.svg` (per-node + total CPU %, per-node + total memory MB vs subscriber count) and `perf-resources.csv`.
+Ramps connected-and-subscribed clients through `PERF_RES_SUBS` (default `0,1000,2500,5000,7500,10000`, spread across all 3 nodes), and at each level measures broker resource usage under three workloads over the same connections: idle (no publishing), each subscriber publishing `PERF_RES_MSG_RATE` (default 10) QoS 1 messages/sec to its own `chat/{userid}/m/all` topic, and the same at QoS 2 (`PERF_RES_PAYLOAD`-byte payloads, default 64). Each measurement waits `PERF_SETTLE_SECS` (default 10) and averages `PERF_SAMPLES` (default 3) `docker stats` readings of the broker containers (`PERF_SERVICES`, default `node1,node2,node3`). Provisioned users are superusers so each may publish to its own topic. Writes one chart per workload, each with the same per-node + total CPU % and memory MB layout vs subscriber count: `perf-resources.svg` (idle), `perf-resources-qos1.svg`, and `perf-resources-qos2.svg`, plus matching `.csv` files.
 
 ## Configuration
 
