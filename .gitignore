@@ -1,2 +1,4 @@
 /target
 /data
+.codegraph/
+.claude/
