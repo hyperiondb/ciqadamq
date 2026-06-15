@@ -89,7 +89,7 @@ features = [
 ]
 
 [dependencies.rmqtt-raft]
-version = "0.6.0"
+version = "0.8.0"
 features = ["reuse"]
 
 [dependencies.rust-box]

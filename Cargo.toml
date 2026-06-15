@@ -1,10 +1,10 @@
 [package]
 name = "ciqadamq"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2024"
 description = "Clustered MQTT broker built on RMQTT with a REST API for user management, per-user topic ACLs, and message expiry"
 authors = ["Tadas Talaikis <talaikis.tadas@gmail.com>"]
-license = "MIT OR Apache-2.0"
+license = "AGPL-3"
 repository = "https://github.com/hyperiondb/ciqadamq"
 homepage="https://hyperiondb.eu/"
 readme = "README.md"
@@ -66,3 +66,4 @@ rumqttc = { version = "0.25.1", default-features = false, features = ["url", "we
 
 [patch.crates-io]
 rmqtt-cluster-raft = { path = "vendor/rmqtt-cluster-raft" }
+rmqtt = { path = "vendor/rmqtt" }

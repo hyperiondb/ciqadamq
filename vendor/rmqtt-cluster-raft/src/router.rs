@@ -435,10 +435,10 @@ impl Store for ClusterRouter {
                 || bincode::serialize(&relations).map(|data| compress(compression, data)),
                 || bincode::serialize(&client_states).map(|data| compress(compression, data)),
             );
-            let relations_bin = relations_bin??;
-            let client_states_bin = client_states_bin??;
-            let topics_count_bin = bincode::serialize(&topics_count.as_ref())?;
-            let relations_count_bin = bincode::serialize(&relations_count.as_ref())?;
+            let relations_bin = relations_bin.map_err(|e| Error::Other(e))??;
+            let client_states_bin = client_states_bin.map_err(|e| Error::Other(e))??;
+            let topics_count_bin = bincode::serialize(&topics_count.as_ref()).map_err(|e| Error::Other(e))?;
+            let relations_count_bin = bincode::serialize(&relations_count.as_ref()).map_err(|e| Error::Other(e))?;
 
             let mut snapshot = Vec::new();
             encode_with_length_prefix(&relations_bin, &mut snapshot);

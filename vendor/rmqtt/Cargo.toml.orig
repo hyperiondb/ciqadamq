@@ -1,0 +1,76 @@
+[package]
+name = "rmqtt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+categories.workspace = true
+keywords.workspace = true
+exclude.workspace = true
+rust-version.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+debug = []
+full = ["metrics", "stats", "plugin", "grpc", "tls", "ws", "quic", "delayed", "retain", "msgstore", "shared-subscription", "auto-subscription", "limit-subscription"]
+metrics = ["rmqtt-macros/metrics"]
+stats = []
+plugin = ["rmqtt-macros/plugin"]
+grpc = ["rust-box/handy-grpc", "rust-box/mpsc", "msgstore"]
+tls = ["rmqtt-net/tls"]
+ws = ["rmqtt-net/ws"]
+quic = ["rmqtt-net/quic"]
+delayed = []
+retain = []
+msgstore = []
+shared-subscription = []
+auto-subscription = []
+limit-subscription = []
+macros = ["dep:rmqtt-macros", "metrics", "plugin"]
+
+[dependencies]
+rmqtt-net.workspace = true
+rmqtt-codec.workspace = true
+rmqtt-macros = { workspace = true, optional = true }
+rmqtt-utils.workspace = true
+rust-box = { workspace = true, features = ["dequemap", "task-exec-queue", "task-exec-queue-rate"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+futures.workspace = true
+log.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+bytes = { workspace = true, features = ["serde"] }
+bytestring = { workspace = true, features = ["serde"] }
+base64.workspace = true
+bitflags.workspace = true
+itertools.workspace = true
+dashmap.workspace = true
+ahash.workspace = true
+chrono = { workspace = true, features = ["clock"] }
+get-size = { workspace = true, features = ["derive"] }
+leaky-bucket.workspace = true
+governor.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+systemstat.workspace = true
+bincode.workspace = true
+prost.workspace = true
+rand.workspace = true
+prometheus.workspace = true
+url.workspace = true
+config = { workspace = true, features = ["toml"] }
+scopeguard.workspace = true
+parking_lot.workspace = true
+
+[build-dependencies]
+chrono = { workspace = true, features = ["clock"] }
+rustc_version = "0.4"

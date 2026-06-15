@@ -1,6 +1,6 @@
 FROM rust:1.96-alpine AS builder
 
-RUN apk add --no-cache musl-dev pkgconfig openssl-dev openssl-libs-static protoc protobuf-dev
+RUN apk add --no-cache build-base musl-dev pkgconfig openssl-dev openssl-libs-static protoc protobuf-dev
 ENV OPENSSL_STATIC=1
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
