@@ -115,6 +115,7 @@ async fn main() -> Result<()> {
                 .allow_anonymous(false)
                 .message_expiry_interval(expiry)
                 .max_mqueue_len(cfg.mqtt.max_mqueue_len)
+                .max_inflight(std::num::NonZeroU16::new(cfg.mqtt.max_inflight).unwrap_or(std::num::NonZeroU16::MAX))
                 .bind()?
                 .tcp()?,
         )
@@ -125,6 +126,7 @@ async fn main() -> Result<()> {
                 .allow_anonymous(false)
                 .message_expiry_interval(expiry)
                 .max_mqueue_len(cfg.mqtt.max_mqueue_len)
+                .max_inflight(std::num::NonZeroU16::new(cfg.mqtt.max_inflight).unwrap_or(std::num::NonZeroU16::MAX))
                 .bind()?
                 .ws()?,
         )
