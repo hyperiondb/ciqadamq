@@ -1,2 +1,2 @@
 subscribers,users,published,expected,delivered,duration_secs,delivered_per_sec,p50_ms,p95_ms,p99_ms
-1000,1000,10000,10000,10000,0.802,12476.4,49.67,61.46,63.14
+1000,1000,10000,10000,10000,1.148,8712.7,63.91,135.24,143.85

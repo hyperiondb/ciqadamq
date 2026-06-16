@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
 use rusqlite::{params, Connection, OptionalExtension};
 use sqlx::postgres::PgPoolOptions;
@@ -49,7 +49,9 @@ pub async fn open(url: &str) -> Result<Arc<dyn UserStore>> {
 
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    Ok(Argon2::default()
+    let params = Params::new(9216, 2, 1, None).map_err(|e| anyhow!("argon2 params: {e}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    Ok(argon2
         .hash_password(password.as_bytes(), &salt)
         .map_err(|e| anyhow!("password hashing failed: {e}"))?
         .to_string())

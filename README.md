@@ -109,11 +109,7 @@ Ramps connected-and-subscribed clients through `PERF_RES_SUBS` (default `0,1000,
 Flamegraph (needs elevated prompt):
 
 ```bash
-cargo flamegraph --profile profiling --bin ciqadamq -- config.toml
-# on another terminal:
-$env:PERF_NODES = '127.0.0.1:1883'
-$env:PERF_SUBS  = '1000'
-cargo run --release --features perf --bin perf
+.\flamegraph.ps1
 ```
 
 ## Configuration
