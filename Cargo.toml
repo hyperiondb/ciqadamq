@@ -65,6 +65,10 @@ portpicker = "0.1.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25.1", default-features = false, features = ["url", "websocket"] }
 
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [patch.crates-io]
 rmqtt-cluster-raft = { path = "vendor/rmqtt-cluster-raft" }
 rmqtt = { path = "vendor/rmqtt" }

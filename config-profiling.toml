@@ -1,0 +1,23 @@
+[mqtt]
+tcp_addr = "127.0.0.1:21883"
+ws_addr = "127.0.0.1:28083"
+message_expiry_secs = 1200
+max_mqueue_len = 1000
+
+[api]
+addr = "127.0.0.1:28090"
+internal_auth_addr = "127.0.0.1:28091"
+token = "change-me"
+
+[db]
+url = "sqlite://data/users-profiling.db"
+
+[fanout]
+auto_subscribe = false
+qos = 1
+
+[acl]
+enabled = true
+publish_topics = ["chatsync", "updates"]
+fanout_prefixes = ["fanout"]
+admin_prefixes = ["adminfanout"]

@@ -123,6 +123,14 @@ async fn main() -> Result<()> {
         expiry.as_secs()
     );
 
+    if let Some(secs) = std::env::var("PROFILE_SECS").ok().and_then(|s| s.parse::<u64>().ok()) {
+        log::info!("PROFILE_SECS={secs}: broker will exit cleanly after {secs}s so the profiler can write its output");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            std::process::exit(0);
+        });
+    }
+
     MqttServer::new(scx)
         .listener(
             Builder::new()
@@ -189,7 +197,7 @@ raft_peer_addrs = {raft_addrs}
 laddr = "{raft_laddr}"
 leader_id = {leader_id}
 verify_addr = true
-try_lock_timeout = "10s"
+try_lock_timeout = "3s"
 health.exit_on_node_unavailable = false
 raft.check_quorum = true
 raft.pre_vote = true

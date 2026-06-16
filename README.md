@@ -86,7 +86,9 @@ scripts\cluster-e2e.ps1           # compose up -> cross-node e2e -> compose down
 
 ## Performance tests
 
-Beware. This tesst takes forever.
+Note. This tesst takes forever.
+
+Note. 100% cpu = 1 core.
 
 ```bash
 docker compose up -d --build
@@ -103,6 +105,16 @@ cargo run --release --features perf --bin perf-resources
 ```
 
 Ramps connected-and-subscribed clients through `PERF_RES_SUBS` (default `0,1000,2500,5000,7500,10000`, spread across all 3 nodes), and at each level measures broker resource usage under three workloads over the same connections: idle (no publishing), each subscriber publishing `PERF_RES_MSG_RATE` (default 10) QoS 1 messages/sec to its own `chat/{userid}/m/all` topic, and the same at QoS 2 (`PERF_RES_PAYLOAD`-byte payloads, default 64). Each measurement waits `PERF_SETTLE_SECS` (default 10) and averages `PERF_SAMPLES` (default 3) `docker stats` readings of the broker containers (`PERF_SERVICES`, default `node1,node2,node3`). Provisioned users are superusers so each may publish to its own topic. Writes one chart per workload, each with the same per-node + total CPU % and memory MB layout vs subscriber count: `perf-resources.svg` (idle), `perf-resources-qos1.svg`, and `perf-resources-qos2.svg`, plus matching `.csv` files.
+
+Flamegraph (needs elevated prompt):
+
+```bash
+cargo flamegraph --profile profiling --bin ciqadamq -- config.toml
+# on another terminal:
+$env:PERF_NODES = '127.0.0.1:1883'
+$env:PERF_SUBS  = '1000'
+cargo run --release --features perf --bin perf
+```
 
 ## Configuration
 
