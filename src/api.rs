@@ -8,7 +8,10 @@ use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 const X_SUPERUSER: HeaderName = HeaderName::from_static("x-superuser");
 const X_CACHE: HeaderName = HeaderName::from_static("x-cache");
@@ -18,6 +21,50 @@ pub struct AppState {
     pub db: Arc<dyn UserStore>,
     pub token: Arc<String>,
     pub acl: Arc<AclConfig>,
+    pub auth_cache: Arc<AuthCache>,
+}
+
+pub struct AuthCache {
+    map: RwLock<HashMap<(String, [u8; 32]), (bool, Instant)>>,
+    ttl: Duration,
+}
+
+impl AuthCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self { map: RwLock::new(HashMap::new()), ttl }
+    }
+
+    fn get(&self, key: &(String, [u8; 32])) -> Option<bool> {
+        let guard = self.map.read().ok()?;
+        let (superuser, expiry) = *guard.get(key)?;
+        if expiry > Instant::now() {
+            Some(superuser)
+        } else {
+            None
+        }
+    }
+
+    fn insert(&self, key: (String, [u8; 32]), superuser: bool) {
+        if self.ttl.is_zero() {
+            return;
+        }
+        if let Ok(mut guard) = self.map.write() {
+            guard.insert(key, (superuser, Instant::now() + self.ttl));
+        }
+    }
+
+    fn purge_user(&self, username: &str) {
+        if let Ok(mut guard) = self.map.write() {
+            guard.retain(|(u, _), _| u != username);
+        }
+    }
+
+    pub fn sweep(&self) {
+        let now = Instant::now();
+        if let Ok(mut guard) = self.map.write() {
+            guard.retain(|_, (_, expiry)| *expiry > now);
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,7 +166,10 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
 
 async fn delete_user(State(state): State<AppState>, Path(username): Path<String>) -> Response {
     match state.db.delete_user(&username).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            state.auth_cache.purge_user(&username);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "user not found"}))).into_response(),
         Err(e) => internal_error(e),
     }
@@ -145,10 +195,31 @@ async fn list_users(State(state): State<AppState>) -> Response {
     }
 }
 
+fn auth_key(username: &str, password: &str) -> (String, [u8; 32]) {
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(Sha256::digest(password.as_bytes()).as_slice());
+    (username.to_string(), hash)
+}
+
+fn allow_response(superuser: bool) -> Response {
+    if superuser {
+        (StatusCode::OK, [(X_SUPERUSER, "true")], "allow").into_response()
+    } else {
+        (StatusCode::OK, "allow").into_response()
+    }
+}
+
 async fn mqtt_auth(State(state): State<AppState>, Form(req): Form<AuthReq>) -> Response {
     let (Some(username), Some(password)) = (req.username, req.password) else {
         return (StatusCode::OK, "deny").into_response();
     };
+    if username.is_empty() || password.is_empty() {
+        return (StatusCode::OK, "deny").into_response();
+    }
+    let key = auth_key(&username, &password);
+    if let Some(superuser) = state.auth_cache.get(&key) {
+        return allow_response(superuser);
+    }
     let record = match state.db.get_user(&username).await {
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::OK, "deny").into_response(),
@@ -158,8 +229,10 @@ async fn mqtt_auth(State(state): State<AppState>, Form(req): Form<AuthReq>) -> R
     let verified =
         tokio::task::spawn_blocking(move || db::verify_password(&record.password_hash, &password)).await;
     match verified {
-        Ok(true) if superuser => (StatusCode::OK, [(X_SUPERUSER, "true")], "allow").into_response(),
-        Ok(true) => (StatusCode::OK, "allow").into_response(),
+        Ok(true) => {
+            state.auth_cache.insert(key, superuser);
+            allow_response(superuser)
+        }
         Ok(false) => (StatusCode::OK, "deny").into_response(),
         Err(e) => internal_error(e.into()),
     }

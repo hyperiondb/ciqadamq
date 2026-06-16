@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ciqadamq}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ciqadamq}
@@ -22,6 +23,7 @@ services:
       API_TOKEN: ${API_TOKEN:-change-me}
       DB_URL: postgres://${POSTGRES_USER:-ciqadamq}:${POSTGRES_PASSWORD:-ciqadamq}@postgres:5432/${POSTGRES_DB:-ciqadamq}
       RUST_LOG: ${RUST_LOG:-info}
+      AUTH_CACHE_TTL_SECS: ${AUTH_CACHE_TTL_SECS:-300}
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
     ports:
@@ -46,6 +48,7 @@ services:
       API_TOKEN: ${API_TOKEN:-change-me}
       DB_URL: postgres://${POSTGRES_USER:-ciqadamq}:${POSTGRES_PASSWORD:-ciqadamq}@postgres:5432/${POSTGRES_DB:-ciqadamq}
       RUST_LOG: ${RUST_LOG:-info}
+      AUTH_CACHE_TTL_SECS: ${AUTH_CACHE_TTL_SECS:-300}
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
     ports:
@@ -70,6 +73,7 @@ services:
       API_TOKEN: ${API_TOKEN:-change-me}
       DB_URL: postgres://${POSTGRES_USER:-ciqadamq}:${POSTGRES_PASSWORD:-ciqadamq}@postgres:5432/${POSTGRES_DB:-ciqadamq}
       RUST_LOG: ${RUST_LOG:-info}
+      AUTH_CACHE_TTL_SECS: ${AUTH_CACHE_TTL_SECS:-300}
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
     ports:

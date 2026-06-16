@@ -28,10 +28,26 @@ async fn main() -> Result<()> {
     });
 
     let db = db::open(&cfg.db.url).await?;
+    let auth_cache_ttl = std::env::var("AUTH_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let auth_cache = Arc::new(api::AuthCache::new(Duration::from_secs(auth_cache_ttl)));
+    {
+        let auth_cache = auth_cache.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                auth_cache.sweep();
+            }
+        });
+    }
     let state = AppState {
         db: db.clone(),
         token: Arc::new(token),
         acl: Arc::new(cfg.acl.clone()),
+        auth_cache,
     };
 
     let mgmt_listener = tokio::net::TcpListener::bind(cfg.api.addr).await?;
