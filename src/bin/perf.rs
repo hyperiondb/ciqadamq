@@ -45,7 +45,7 @@ fn load_settings() -> Result<Settings> {
             Ok((h.to_string(), p.parse::<u16>()?))
         })
         .collect::<Result<Vec<_>>>()?;
-    let sub_counts = env_or("PERF_SUBS", "100,500,1000,2500,5000,10000")
+    let sub_counts = env_or("PERF_SUBS", "100,500,1000,2500,5000,10000,100000")
         .split(',')
         .map(|s| s.trim().parse::<usize>().context("PERF_SUBS must be integers"))
         .collect::<Result<Vec<_>>>()?;

@@ -53,7 +53,7 @@ fn load_settings() -> Result<Settings> {
             Ok((h.to_string(), p.parse::<u16>()?))
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut sub_levels = env_or("PERF_RES_SUBS", "0,1000,2500,5000,7500,10000")
+    let mut sub_levels = env_or("PERF_RES_SUBS", "0,1000,2500,5000")
         .split(',')
         .map(|s| s.trim().parse::<usize>().context("PERF_RES_SUBS must be integers"))
         .collect::<Result<Vec<_>>>()?;
