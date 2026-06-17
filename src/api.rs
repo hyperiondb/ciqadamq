@@ -1,20 +1,23 @@
 use crate::config::AclConfig;
 use crate::db::{self, NewUser, UserRecord, UserStore};
+use async_trait::async_trait;
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderName, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Form, Json, Router};
-use serde::Deserialize;
+use axum::{Json, Router};
+use rmqtt::acl::{Action, AuthInfo, Permission, Rule, Topic};
+use rmqtt::codec::v5::SubscribeAckReason;
+use rmqtt::context::ServerContext;
+use rmqtt::hook::{Handler, HookResult, Parameter, Register, ReturnType, Type};
+use rmqtt::types::{AuthResult, ConnectInfo, PublishAclResult, SubscribeAclResult};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-
-const X_SUPERUSER: HeaderName = HeaderName::from_static("x-superuser");
-const X_CACHE: HeaderName = HeaderName::from_static("x-cache");
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,6 +25,10 @@ pub struct AppState {
     pub token: Arc<String>,
     pub acl: Arc<AclConfig>,
     pub auth_cache: Arc<AuthCache>,
+    pub users: Arc<UserCache>,
+    pub peers: Arc<Vec<String>>,
+    pub http: reqwest::Client,
+    pub auth_sem: Arc<tokio::sync::Semaphore>,
 }
 
 pub struct AuthCache {
@@ -53,9 +60,52 @@ impl AuthCache {
         }
     }
 
-    fn purge_user(&self, username: &str) {
+    pub fn purge_user(&self, username: &str) {
         if let Ok(mut guard) = self.map.write() {
             guard.retain(|(u, _), _| u != username);
+        }
+    }
+
+    pub fn sweep(&self) {
+        let now = Instant::now();
+        if let Ok(mut guard) = self.map.write() {
+            guard.retain(|_, (_, expiry)| *expiry > now);
+        }
+    }
+}
+
+pub struct UserCache {
+    map: RwLock<HashMap<String, (UserRecord, Instant)>>,
+    ttl: Duration,
+}
+
+impl UserCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self { map: RwLock::new(HashMap::new()), ttl }
+    }
+
+    fn get(&self, username: &str) -> Option<UserRecord> {
+        let guard = self.map.read().ok()?;
+        let (record, expiry) = guard.get(username)?;
+        if *expiry > Instant::now() {
+            Some(record.clone())
+        } else {
+            None
+        }
+    }
+
+    fn insert(&self, username: String, record: UserRecord) {
+        if self.ttl.is_zero() {
+            return;
+        }
+        if let Ok(mut guard) = self.map.write() {
+            guard.insert(username, (record, Instant::now() + self.ttl));
+        }
+    }
+
+    pub fn purge(&self, username: &str) {
+        if let Ok(mut guard) = self.map.write() {
+            guard.remove(username);
         }
     }
 
@@ -78,32 +128,14 @@ struct CreateUser {
     admin: bool,
 }
 
-#[derive(Deserialize)]
-struct AuthReq {
-    username: Option<String>,
-    password: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AclReq {
-    access: Option<String>,
-    username: Option<String>,
-    topic: Option<String>,
-}
-
 pub fn management_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{username}", axum::routing::delete(delete_user))
+        .route("/internal/replicate", post(replicate))
+        .route("/internal/users-full", get(users_full))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token))
         .route("/health", get(|| async { "ok" }))
-        .with_state(state)
-}
-
-pub fn auth_router(state: AppState) -> Router {
-    Router::new()
-        .route("/mqtt/auth", post(mqtt_auth))
-        .route("/mqtt/acl", post(mqtt_acl))
         .with_state(state)
 }
 
@@ -141,6 +173,7 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
         return bad_request("password must be 1-512 bytes");
     }
     let password = req.password;
+    let _permit = state.auth_sem.clone().acquire_owned().await;
     let hash = match tokio::task::spawn_blocking(move || db::hash_password(&password)).await {
         Ok(Ok(h)) => h,
         Ok(Err(e)) => return internal_error(e),
@@ -149,16 +182,26 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
     let user = NewUser {
         username: req.username.clone(),
         userid: req.userid.clone(),
-        password_hash: hash,
+        password_hash: hash.clone(),
         superuser: req.superuser,
         admin: req.admin,
     };
     match state.db.insert_user(user).await {
-        Ok(true) => (
-            StatusCode::CREATED,
-            Json(json!({"username": req.username, "userid": req.userid})),
-        )
-            .into_response(),
+        Ok(true) => {
+            let rec = UserRecord {
+                username: req.username.clone(),
+                userid: req.userid.clone(),
+                password_hash: hash,
+                superuser: req.superuser,
+                admin: req.admin,
+            };
+            fanout(&state, &ReplOp::Upsert { user: rec }).await;
+            (
+                StatusCode::CREATED,
+                Json(json!({"username": req.username, "userid": req.userid})),
+            )
+                .into_response()
+        }
         Ok(false) => (StatusCode::CONFLICT, Json(json!({"error": "user already exists"}))).into_response(),
         Err(e) => internal_error(e),
     }
@@ -168,6 +211,8 @@ async fn delete_user(State(state): State<AppState>, Path(username): Path<String>
     match state.db.delete_user(&username).await {
         Ok(true) => {
             state.auth_cache.purge_user(&username);
+            state.users.purge(&username);
+            fanout(&state, &ReplOp::Delete { username: username.clone() }).await;
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "user not found"}))).into_response(),
@@ -201,82 +246,260 @@ fn auth_key(username: &str, password: &str) -> (String, [u8; 32]) {
     (username.to_string(), hash)
 }
 
-fn allow_response(superuser: bool) -> Response {
-    if superuser {
-        (StatusCode::OK, [(X_SUPERUSER, "true")], "allow").into_response()
-    } else {
-        (StatusCode::OK, "allow").into_response()
+async fn lookup_user(state: &AppState, username: &str) -> Result<Option<UserRecord>, Response> {
+    if let Some(record) = state.users.get(username) {
+        return Ok(Some(record));
     }
-}
-
-async fn mqtt_auth(State(state): State<AppState>, Form(req): Form<AuthReq>) -> Response {
-    let (Some(username), Some(password)) = (req.username, req.password) else {
-        return (StatusCode::OK, "deny").into_response();
-    };
-    if username.is_empty() || password.is_empty() {
-        return (StatusCode::OK, "deny").into_response();
-    }
-    let key = auth_key(&username, &password);
-    if let Some(superuser) = state.auth_cache.get(&key) {
-        return allow_response(superuser);
-    }
-    let record = match state.db.get_user(&username).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::OK, "deny").into_response(),
-        Err(e) => return internal_error(e),
-    };
-    let superuser = record.superuser;
-    let verified =
-        tokio::task::spawn_blocking(move || db::verify_password(&record.password_hash, &password)).await;
-    match verified {
-        Ok(true) => {
-            state.auth_cache.insert(key, superuser);
-            allow_response(superuser)
+    match state.db.get_user(username).await {
+        Ok(Some(record)) => {
+            state.users.insert(username.to_string(), record.clone());
+            Ok(Some(record))
         }
-        Ok(false) => (StatusCode::OK, "deny").into_response(),
-        Err(e) => internal_error(e.into()),
+        Ok(None) => Ok(None),
+        Err(e) => Err(internal_error(e)),
     }
 }
 
-async fn mqtt_acl(State(state): State<AppState>, Form(req): Form<AclReq>) -> Response {
-    if !state.acl.enabled {
-        return (StatusCode::OK, "ignore").into_response();
-    }
-    let (Some(access), Some(username), Some(topic)) = (req.access, req.username, req.topic) else {
-        return (StatusCode::OK, "deny").into_response();
-    };
-    let record = match state.db.get_user(&username).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::OK, "deny").into_response(),
-        Err(e) => return internal_error(e),
-    };
-    let allowed = match access.as_str() {
-        "1" => record.superuser || subscribe_allowed(&state.acl, &record, &topic),
-        "2" => record.superuser || publish_allowed(&state.acl, &topic),
-        _ => false,
-    };
-    let verdict = if allowed { "allow" } else { "deny" };
-    if access == "2" {
-        (StatusCode::OK, [(X_CACHE, "-1")], verdict).into_response()
-    } else {
-        (StatusCode::OK, verdict).into_response()
+pub async fn register_auth_hooks(scx: &ServerContext, state: AppState) -> Box<dyn Register> {
+    let register = scx.extends.hook_mgr().register();
+    register.add(Type::ClientAuthenticate, Box::new(MqttAuth { state: state.clone() })).await;
+    register.add(Type::ClientSubscribeCheckAcl, Box::new(MqttAuth { state: state.clone() })).await;
+    register.add(Type::MessagePublishCheckAcl, Box::new(MqttAuth { state })).await;
+    register.start().await;
+    register
+}
+
+struct MqttAuth {
+    state: AppState,
+}
+
+impl MqttAuth {
+    async fn authenticate(&self, connect_info: &ConnectInfo) -> ReturnType {
+        let username = connect_info.username().map(|u| u.to_string());
+        let password =
+            connect_info.password().and_then(|p| std::str::from_utf8(p).ok().map(|s| s.to_string()));
+        let (Some(username), Some(password)) = (username, password) else {
+            return deny_auth();
+        };
+        if username.is_empty() || password.is_empty() {
+            return deny_auth();
+        }
+        let record = match lookup_user(&self.state, &username).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return deny_auth(),
+            Err(_) => return (false, Some(HookResult::AuthResult(AuthResult::NotAuthorized))),
+        };
+        let key = auth_key(&username, &password);
+        let verified = if self.state.auth_cache.get(&key).is_some() {
+            true
+        } else {
+            let _permit = self.state.auth_sem.clone().acquire_owned().await;
+            let hash = record.password_hash.clone();
+            let pw = password.clone();
+            match tokio::task::spawn_blocking(move || db::verify_password(&hash, &pw)).await {
+                Ok(true) => {
+                    self.state.auth_cache.insert(key, record.superuser);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !verified {
+            return deny_auth();
+        }
+        let auth_info = build_auth_info(&record, &self.state.acl, connect_info);
+        (false, Some(HookResult::AuthResult(AuthResult::Allow(record.superuser, Some(auth_info)))))
     }
 }
 
-fn subscribe_allowed(acl: &AclConfig, user: &UserRecord, topic_filter: &str) -> bool {
-    let mut parts = topic_filter.split('/');
-    let first = parts.next().unwrap_or("");
-    if acl.fanout_prefixes.iter().any(|p| p == first) {
-        return true;
+#[async_trait]
+impl Handler for MqttAuth {
+    async fn hook(&self, param: &Parameter, acc: Option<HookResult>) -> ReturnType {
+        match param {
+            Parameter::ClientAuthenticate(connect_info) => self.authenticate(connect_info).await,
+            Parameter::ClientSubscribeCheckAcl(session, subscribe) => {
+                if !self.state.acl.enabled {
+                    return (
+                        false,
+                        Some(HookResult::SubscribeAclResult(SubscribeAclResult::new_success(
+                            subscribe.opts.qos(),
+                            None,
+                        ))),
+                    );
+                }
+                if let Some(auth_info) = &session.auth_info {
+                    if let Some(res) = auth_info.subscribe_acl(subscribe).await {
+                        return res;
+                    }
+                }
+                (
+                    false,
+                    Some(HookResult::SubscribeAclResult(SubscribeAclResult::new_failure(
+                        SubscribeAckReason::NotAuthorized,
+                    ))),
+                )
+            }
+            Parameter::MessagePublishCheckAcl(session, publish) => {
+                if !self.state.acl.enabled {
+                    return (false, Some(HookResult::PublishAclResult(PublishAclResult::allow())));
+                }
+                if let Some(auth_info) = &session.auth_info {
+                    if let Some(res) = auth_info.publish_acl(publish, true).await {
+                        return res;
+                    }
+                }
+                (false, Some(HookResult::PublishAclResult(PublishAclResult::rejected(true, None))))
+            }
+            _ => (true, acc),
+        }
     }
-    if user.admin && acl.admin_prefixes.iter().any(|p| p == first) {
-        return true;
-    }
-    matches!(parts.next(), Some(second) if second == user.userid)
 }
 
-fn publish_allowed(acl: &AclConfig, topic: &str) -> bool {
-    acl.publish_topics.iter().any(|t| t == topic)
+fn deny_auth() -> ReturnType {
+    (false, Some(HookResult::AuthResult(AuthResult::BadUsernameOrPassword)))
+}
+
+fn build_auth_info(record: &UserRecord, acl: &AclConfig, ci: &ConnectInfo) -> AuthInfo {
+    if record.superuser {
+        return AuthInfo { superuser: true, expire_at: None, rules: Vec::new() };
+    }
+    let mut filters: Vec<String> = vec![format!("+/{}/#", record.userid)];
+    for p in &acl.fanout_prefixes {
+        filters.push(format!("{p}/#"));
+    }
+    if record.admin {
+        for p in &acl.admin_prefixes {
+            filters.push(format!("{p}/#"));
+        }
+    }
+    let mut rules = Vec::new();
+    for f in filters {
+        if let Ok(topic) = Topic::try_from((f.as_str(), ci)) {
+            rules.push(Rule {
+                permission: Permission::Allow,
+                action: Action::Subscribe,
+                qos: None,
+                retain: None,
+                topic,
+            });
+        }
+    }
+    for t in &acl.publish_topics {
+        if let Ok(topic) = Topic::try_from((format!("eq {t}").as_str(), ci)) {
+            rules.push(Rule {
+                permission: Permission::Allow,
+                action: Action::Publish,
+                qos: None,
+                retain: None,
+                topic,
+            });
+        }
+    }
+    AuthInfo { superuser: false, expire_at: None, rules }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+enum ReplOp {
+    Upsert { user: UserRecord },
+    Delete { username: String },
+}
+
+async fn fanout(state: &AppState, op: &ReplOp) {
+    if state.peers.is_empty() {
+        return;
+    }
+    let body = match serde_json::to_value(op) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("replicate encode failed: {e}");
+            return;
+        }
+    };
+    let mut set = tokio::task::JoinSet::new();
+    for base in state.peers.iter() {
+        let http = state.http.clone();
+        let token = state.token.clone();
+        let url = format!("{base}/internal/replicate");
+        let body = body.clone();
+        set.spawn(async move {
+            match http.post(&url).bearer_auth(token.as_str()).json(&body).send().await {
+                Ok(r) if r.status().is_success() => {}
+                Ok(r) => log::warn!("replicate to {url} returned {}", r.status()),
+                Err(e) => log::warn!("replicate to {url} failed: {e}"),
+            }
+        });
+    }
+    while set.join_next().await.is_some() {}
+}
+
+async fn replicate(State(state): State<AppState>, Json(op): Json<ReplOp>) -> Response {
+    let username = match op {
+        ReplOp::Upsert { user } => {
+            let username = user.username.clone();
+            let nu = NewUser {
+                username: user.username,
+                userid: user.userid,
+                password_hash: user.password_hash,
+                superuser: user.superuser,
+                admin: user.admin,
+            };
+            if let Err(e) = state.db.upsert_user(nu).await {
+                return internal_error(e);
+            }
+            username
+        }
+        ReplOp::Delete { username } => {
+            if let Err(e) = state.db.delete_user(&username).await {
+                return internal_error(e);
+            }
+            username
+        }
+    };
+    state.auth_cache.purge_user(&username);
+    state.users.purge(&username);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn users_full(State(state): State<AppState>) -> Response {
+    match state.db.list_users().await {
+        Ok(users) => Json(users).into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+pub async fn catch_up(state: AppState) {
+    if state.peers.is_empty() {
+        return;
+    }
+    for _ in 0..30 {
+        for base in state.peers.iter() {
+            let url = format!("{base}/internal/users-full");
+            if let Ok(resp) = state.http.get(&url).bearer_auth(state.token.as_str()).send().await {
+                if resp.status().is_success() {
+                    if let Ok(users) = resp.json::<Vec<UserRecord>>().await {
+                        let users: Vec<NewUser> = users
+                            .into_iter()
+                            .map(|u| NewUser {
+                                username: u.username,
+                                userid: u.userid,
+                                password_hash: u.password_hash,
+                                superuser: u.superuser,
+                                admin: u.admin,
+                            })
+                            .collect();
+                        if let Err(e) = state.db.upsert_many(users).await {
+                            log::warn!("user snapshot apply failed: {e}");
+                        }
+                        log::info!("user snapshot synced from {base}");
+                        return;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    log::warn!("user snapshot catch-up: no peer responded yet");
 }
 
 fn bad_request(msg: &str) -> Response {

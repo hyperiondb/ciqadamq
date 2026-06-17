@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod db;
 mod fanout;
+mod msgstore;
 
 use anyhow::Result;
 use api::AppState;
@@ -11,7 +12,6 @@ use fanout::UseridAutoSubscription;
 use rmqtt::context::ServerContext;
 use rmqtt::net::Builder;
 use rmqtt::server::MqttServer;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,22 +33,55 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
     let auth_cache = Arc::new(api::AuthCache::new(Duration::from_secs(auth_cache_ttl)));
+    let user_cache = Arc::new(api::UserCache::new(Duration::from_secs(auth_cache_ttl)));
     {
         let auth_cache = auth_cache.clone();
+        let user_cache = user_cache.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(60));
             loop {
                 tick.tick().await;
                 auth_cache.sweep();
+                user_cache.sweep();
             }
         });
     }
+    let api_port = cfg.api.addr.port();
+    let my_id = cfg.cluster.node_id;
+    let peers: Vec<String> = cfg
+        .cluster
+        .node_grpc_addrs
+        .iter()
+        .filter_map(|entry| {
+            let (id, hostport) = entry.split_once('@')?;
+            if id.parse::<u64>().ok()? == my_id {
+                return None;
+            }
+            let host = hostport.split(':').next()?;
+            Some(format!("http://{host}:{api_port}"))
+        })
+        .collect();
+    let hash_concurrency: usize = std::env::var("AUTH_HASH_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
     let state = AppState {
         db: db.clone(),
         token: Arc::new(token),
         acl: Arc::new(cfg.acl.clone()),
         auth_cache,
+        users: user_cache,
+        peers: Arc::new(peers),
+        http: reqwest::Client::new(),
+        auth_sem: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
     };
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            api::catch_up(state).await;
+        });
+    }
 
     let mgmt_listener = tokio::net::TcpListener::bind(cfg.api.addr).await?;
     let mgmt = api::management_router(state.clone());
@@ -59,29 +92,16 @@ async fn main() -> Result<()> {
     });
     log::info!("management api listening on {}", cfg.api.addr);
 
-    let auth_listener = tokio::net::TcpListener::bind(cfg.api.internal_auth_addr).await?;
-    let auth = api::auth_router(state.clone());
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(auth_listener, auth).await {
-            log::error!("internal auth server failed: {e}");
-        }
-    });
-    log::info!("internal auth endpoint listening on {}", cfg.api.internal_auth_addr);
-
     let mut scx_builder = ServerContext::new()
         .node_id(cfg.cluster.node_id)
-        .busy_check_enable(cfg.mqtt.busy_check)
-        .plugins_config_map_add(
-            "rmqtt-auth-http",
-            auth_http_plugin_config(&cfg.api.internal_auth_addr, cfg.acl.enabled),
-        );
+        .busy_check_enable(cfg.mqtt.busy_check);
     if cfg.cluster.enabled {
         scx_builder = scx_builder
             .plugins_config_map_add("rmqtt-cluster-raft", cluster_raft_plugin_config(&cfg.cluster));
     }
     let scx = scx_builder.build().await;
 
-    rmqtt_auth_http::register(&scx, true, true).await?;
+    let _auth_reg = api::register_auth_hooks(&scx, state.clone()).await;
 
     if cfg.cluster.enabled {
         log::info!(
@@ -115,6 +135,42 @@ async fn main() -> Result<()> {
             Box::new(UseridAutoSubscription::new(db.clone(), &cfg.fanout, &cfg.acl));
     }
 
+    let mut shutdown_flush: Option<msgstore::RedbMessageStore> = None;
+    if cfg.mqtt.persist_messages {
+        if let Some(path) = cfg.db.url.strip_prefix("redb://") {
+            let msg_path = std::path::Path::new(path)
+                .parent()
+                .map(|d| d.join("messages.redb"))
+                .unwrap_or_else(|| std::path::PathBuf::from("messages.redb"));
+            match msgstore::RedbMessageStore::open(&msg_path, cfg.cluster.node_id) {
+                Ok(store) => {
+                    let flush_secs: u64 = std::env::var("MSG_FLUSH_SECS")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(5);
+                    if flush_secs > 0 {
+                        shutdown_flush = Some(store.clone());
+                        let flusher = store.clone();
+                        tokio::spawn(async move {
+                            let mut tick = tokio::time::interval(Duration::from_secs(flush_secs));
+                            loop {
+                                tick.tick().await;
+                                flusher.flush().await;
+                            }
+                        });
+                        log::info!("message persistence enabled (redb, flush every {flush_secs}s)");
+                    } else {
+                        log::info!("message store in-memory only (MSG_FLUSH_SECS=0, no disk flush)");
+                    }
+                    *scx.extends.message_mgr_mut().await = Box::new(store);
+                }
+                Err(e) => log::error!("message persistence init failed: {e:#}"),
+            }
+        } else {
+            log::warn!("mqtt.persist_messages set but db.url is not redb; persistence disabled");
+        }
+    }
+
     let expiry = Duration::from_secs(cfg.mqtt.message_expiry_secs);
     log::info!(
         "starting mqtt broker: tcp {} ws {} message expiry {}s",
@@ -131,12 +187,13 @@ async fn main() -> Result<()> {
         });
     }
 
-    MqttServer::new(scx)
+    let server = MqttServer::new(scx)
         .listener(
             Builder::new()
                 .name("external/tcp")
                 .laddr(cfg.mqtt.tcp_addr)
                 .allow_anonymous(false)
+                .nodelay(true)
                 .message_expiry_interval(expiry)
                 .max_mqueue_len(cfg.mqtt.max_mqueue_len)
                 .max_inflight(std::num::NonZeroU16::new(cfg.mqtt.max_inflight).unwrap_or(std::num::NonZeroU16::MAX))
@@ -148,49 +205,56 @@ async fn main() -> Result<()> {
                 .name("external/ws")
                 .laddr(cfg.mqtt.ws_addr)
                 .allow_anonymous(false)
+                .nodelay(true)
                 .message_expiry_interval(expiry)
                 .max_mqueue_len(cfg.mqtt.max_mqueue_len)
                 .max_inflight(std::num::NonZeroU16::new(cfg.mqtt.max_inflight).unwrap_or(std::num::NonZeroU16::MAX))
                 .bind()?
                 .ws()?,
         )
-        .build()
-        .run()
-        .await?;
+        .build();
+
+    tokio::select! {
+        res = server.run() => res?,
+        _ = shutdown_signal() => {
+            if let Some(store) = &shutdown_flush {
+                log::info!("shutdown signal received, flushing message store before exit");
+                store.flush().await;
+            } else {
+                log::info!("shutdown signal received");
+            }
+        }
+    }
     Ok(())
 }
 
-fn auth_http_plugin_config(auth_addr: &SocketAddr, acl_enabled: bool) -> String {
-    let mut cfg = format!(
-        r#"
-http_timeout = "5s"
-deny_if_error = true
-disconnect_if_pub_rejected = true
-http_auth_req.url = "http://{auth_addr}/mqtt/auth"
-http_auth_req.method = "post"
-http_auth_req.headers = {{ content-type = "application/x-www-form-urlencoded" }}
-http_auth_req.params = {{ clientid = "%c", username = "%u", password = "%P" }}
-"#
-    );
-    if acl_enabled {
-        cfg.push_str(&format!(
-            r#"
-http_acl_req.url = "http://{auth_addr}/mqtt/acl"
-http_acl_req.method = "post"
-http_acl_req.headers = {{ content-type = "application/x-www-form-urlencoded" }}
-http_acl_req.params = {{ access = "%A", username = "%u", topic = "%t" }}
-"#
-        ));
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
     }
-    cfg
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 fn cluster_raft_plugin_config(cluster: &ClusterConfig) -> String {
     let grpc_addrs = toml_string_array(&cluster.node_grpc_addrs);
     let raft_addrs = toml_string_array(&cluster.raft_peer_addrs);
+    let worker_threads: usize = std::env::var("RAFT_WORKER_THREADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(6);
     format!(
         r#"
-worker_threads = 6
+worker_threads = {worker_threads}
 message_type = 198
 node_grpc_addrs = {grpc_addrs}
 raft_peer_addrs = {raft_addrs}
@@ -201,6 +265,12 @@ try_lock_timeout = "3s"
 health.exit_on_node_unavailable = false
 raft.check_quorum = true
 raft.pre_vote = true
+raft.election_tick = 30
+raft.heartbeat_tick = 3
+raft.proposal_batch_size = 250
+raft.proposal_batch_timeout = "20ms"
+raft.grpc_breaker_threshold = 50
+raft.grpc_breaker_retry_interval = "500ms"
 "#,
         raft_laddr = cluster.raft_laddr,
         leader_id = cluster.leader_id,

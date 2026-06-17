@@ -24,7 +24,7 @@ exclude = [
 ]
 
 [features]
-perf = ["dep:rumqttc", "dep:reqwest"]
+perf = ["dep:rumqttc"]
 
 [[bin]]
 name = "ciqadamq"
@@ -42,21 +42,20 @@ required-features = ["perf"]
 
 [dependencies]
 anyhow = "1.0.102"
-reqwest = { version = "0.13.4", optional = true, default-features = false, features = ["json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25.1", optional = true, default-features = false }
 argon2 = "0.5.3"
 async-trait = "0.1.89"
 axum = "0.8.9"
+bincode = "1.3"
 env_logger = "0.11.10"
 log = "0.4.32"
-rmqtt = { version = "0.21.0", features = ["ws", "plugin", "auto-subscription", "grpc", "shared-subscription"] }
-rmqtt-auth-http = "0.21.0"
+redb = "2"
+rmqtt = { version = "0.21.0", features = ["ws", "plugin", "auto-subscription", "grpc", "shared-subscription", "msgstore"] }
 rmqtt-cluster-raft = "0.21.0"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.10"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1.52.3", features = ["full"] }
 toml = "1.1.2"
 

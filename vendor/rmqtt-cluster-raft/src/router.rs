@@ -10,7 +10,7 @@ use backoff::{future::retry, ExponentialBackoff};
 use rayon::prelude::*;
 use rust_box::task_exec_queue::{SpawnExt, TaskExecQueue};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 use rmqtt::{
     context::ServerContext,
@@ -92,12 +92,12 @@ impl ClusterRouter {
 
     #[inline]
     pub(crate) async fn set_raft_mailbox(&self, raft_mailbox: Mailbox) {
-        self.raft_mailbox.write().await.replace(raft_mailbox);
+        self.raft_mailbox.write().unwrap().replace(raft_mailbox);
     }
 
     #[inline]
     pub(crate) async fn raft_mailbox(&self) -> Mailbox {
-        if let Some(mailbox) = self.raft_mailbox.read().await.as_ref() {
+        if let Some(mailbox) = self.raft_mailbox.read().unwrap().as_ref() {
             mailbox.clone()
         } else {
             unreachable!()
@@ -140,26 +140,21 @@ impl Router for ClusterRouter {
     #[inline]
     async fn add(&self, topic_filter: &str, id: Id, opts: SubscriptionOptions) -> Result<()> {
         log::debug!("[Router.add] topic_filter: {topic_filter:?}, id: {id:?}, opts: {opts:?}");
-
-        let mut add_res = None;
-        for _ in 0..3 {
-            let mailbox = self.raft_mailbox().await;
-            let msg = Message::Add { topic_filter, id: id.clone(), opts: opts.clone() }.encode()?;
-            let res = async move { mailbox.send_proposal(msg).await.map_err(anyhow::Error::new) }
-                .spawn(&self.add_exec)
+        let msg = Message::Add { topic_filter, id: id.clone(), opts: opts.clone() }.encode()?;
+        let raft_mailbox = self.raft_mailbox().await;
+        let exec = self.add_exec.clone();
+        retry(self.backoff_strategy.clone(), || async {
+            let msg = msg.clone();
+            let mailbox = raft_mailbox.clone();
+            async move { mailbox.send_proposal(msg).await }
+                .spawn(&exec)
                 .result()
                 .await
-                .map_err(|_| anyhow!("Router::add(..), task execution failure"));
-            add_res = Some(res);
-            match add_res.as_ref() {
-                Some(Ok(Ok(_))) => return Ok(()),
-                _ => {
-                    tokio::time::sleep(Duration::from_millis(800)).await;
-                    continue;
-                }
-            }
-        }
-        let _ = add_res.ok_or_else(|| anyhow!("unreachable!()"))???;
+                .map_err(|_| anyhow!("Router::add(..), task execution failure"))?
+                .map_err(|e| anyhow!(e))?;
+            Ok(())
+        })
+        .await?;
         Ok(())
     }
 

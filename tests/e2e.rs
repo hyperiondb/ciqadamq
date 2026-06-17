@@ -22,10 +22,9 @@ async fn start_broker(message_expiry_secs: u64, auto_subscribe: bool) -> Broker 
     let tcp_port = portpicker::pick_unused_port().unwrap();
     let ws_port = portpicker::pick_unused_port().unwrap();
     let api_port = portpicker::pick_unused_port().unwrap();
-    let auth_port = portpicker::pick_unused_port().unwrap();
     let dir = std::env::temp_dir().join(format!("ciqadamq-test-{tcp_port}-{api_port}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let db_path = dir.join("users.db").to_string_lossy().replace('\\', "/");
+    let db_path = dir.join("users.redb").to_string_lossy().replace('\\', "/");
     let cfg = format!(
         r#"
 [mqtt]
@@ -35,11 +34,10 @@ message_expiry_secs = {message_expiry_secs}
 
 [api]
 addr = "127.0.0.1:{api_port}"
-internal_auth_addr = "127.0.0.1:{auth_port}"
 token = "test-token"
 
 [db]
-url = "sqlite://{db_path}"
+url = "redb://{db_path}"
 
 [fanout]
 auto_subscribe = {auto_subscribe}

@@ -23,13 +23,13 @@ pub struct MqttConfig {
     pub max_mqueue_len: usize,
     pub max_inflight: u16,
     pub busy_check: bool,
+    pub persist_messages: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ApiConfig {
     pub addr: SocketAddr,
-    pub internal_auth_addr: SocketAddr,
     pub token: Option<String>,
 }
 
@@ -107,6 +107,7 @@ impl Default for MqttConfig {
             max_mqueue_len: 1000,
             max_inflight: 65535,
             busy_check: false,
+            persist_messages: false,
         }
     }
 }
@@ -115,7 +116,6 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             addr: "0.0.0.0:8090".parse().unwrap(),
-            internal_auth_addr: "127.0.0.1:8091".parse().unwrap(),
             token: None,
         }
     }
@@ -123,7 +123,7 @@ impl Default for ApiConfig {
 
 impl Default for DbConfig {
     fn default() -> Self {
-        Self { url: "sqlite://data/users.db".into() }
+        Self { url: "redb://data/users.redb".into() }
     }
 }
 

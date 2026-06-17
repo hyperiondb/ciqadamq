@@ -8,7 +8,7 @@ Status: **in production**
 
 - MQTT 3.1 / 3.1.1 / 5.0 over TCP (`1883`) and WebSocket (`8083`, path-agnostic, e.g. `ws://host:8083/mqtt`)
 - 3-node clustering via the official `rmqtt-cluster-raft` plugin (subscription table replicated by raft, publishes forwarded only to nodes with matching subscribers)
-- Username/password auth via the official `rmqtt-auth-http` plugin against a loopback endpoint backed by SQLite (dev) or PostgreSQL (cluster), argon2 password hashing
+- Username/password auth
 - Per-user topic ACL mirroring the RabbitMQ permission regexes
 - REST API to create/delete users (bearer token)
 - Messages queued for offline persistent sessions expire after 20 minutes (configurable)
@@ -50,7 +50,7 @@ Fanout works exactly like the RabbitMQ setup: one publish to `chat/{userid}/m/al
 
 ## REST API
 
-`Authorization: Bearer <token>` (config `api.token` / env `API_TOKEN`). Any node of the cluster can serve these (shared Postgres).
+`Authorization: Bearer <token>` (config `api.token` / env `API_TOKEN`). Any node of the cluster can serve these.
 
 | Method | Path | Body |
 |---|---|---|
@@ -61,19 +61,17 @@ Fanout works exactly like the RabbitMQ setup: one publish to `chat/{userid}/m/al
 
 ## Running
 
-Single node (SQLite):
-
 ```
 cargo run --release             # uses ./config.toml
 ```
 
-3-node cluster + Postgres:
+3-node cluster
 
 ```
 docker compose up -d --build
 ```
 
-Node N is reachable at MQTT `188(2+N)`, WS `808(2+N)`, API `809(N-1)` … i.e. node1: 1883/8083/8090, node2: 1884/8084/8091, node3: 1885/8085/8092. Internal ports 5363 (gRPC forwarding) and 6003 (raft) stay on the compose network. Point HAProxy at the three MQTT/WS ports.
+Node N is reachable at MQTT `188(2+N)`, WS `808(2+N)`, i.e. node1: 1883/8083/8090, node2: 1884/8084, node3: 1885/8085. Internal ports 5363 (gRPC forwarding) and 6003 (raft) stay on the compose network. Point HAProxy at the three MQTT/WS ports.
 
 Note: building needs `protoc` (`apt install protobuf-compiler`, or `winget install Google.Protobuf` + `PROTOC` env var on Windows).
 
@@ -118,7 +116,6 @@ See `config.toml` (single node) and `docker/cluster.toml` (cluster). Env overrid
 
 Notes:
 
-- `db.url`: `sqlite://path` or `postgres://user:pass@host/db`; postgres accepts comma-separated hosts (`postgres://user:pass@h1:5432,h2:5432,h3:5432/db`) -- the broker connects to whichever node reports `pg_is_in_recovery() = false` and re-discovers the primary on failover
 - message expiry applies to messages queued for offline persistent sessions (`clean_session=false`); sessions themselves persist 2h (rmqtt default)
 - offline queues live in broker memory: they survive reconnects and migrate between nodes on session takeover, but not a node crash (add rmqtt-session/message-storage with Redis if that matters)
 - retained messages are not enabled (cluster-wide retain requires the Redis retainer plugin)

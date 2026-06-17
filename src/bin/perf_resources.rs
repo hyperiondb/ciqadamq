@@ -153,6 +153,7 @@ async fn try_connect(
     opts.set_credentials(username, "perf-pass");
     opts.set_keep_alive(Duration::from_secs(30));
     let (client, mut eventloop) = AsyncClient::new(opts, 128);
+    eventloop.network_options.set_connection_timeout(30);
     timeout(Duration::from_secs(30), async {
         loop {
             match eventloop.poll().await {

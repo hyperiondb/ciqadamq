@@ -3,14 +3,11 @@ tcp_addr = "0.0.0.0:1883"
 ws_addr = "0.0.0.0:8083"
 message_expiry_secs = 1200
 max_mqueue_len = 1000
+persist_messages = true
 
 [api]
 addr = "0.0.0.0:8090"
-internal_auth_addr = "127.0.0.1:8091"
 token = "change-me"
-
-[db]
-url = "sqlite://data/users.db"
 
 [fanout]
 auto_subscribe = false

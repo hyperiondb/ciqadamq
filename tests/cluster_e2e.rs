@@ -38,7 +38,12 @@ struct TestClient {
     subacks: mpsc::UnboundedReceiver<Vec<SubscribeReasonCode>>,
 }
 
-async fn connect(node: &(String, u16), client_id: &str, username: &str, password: &str) -> TestClient {
+async fn try_connect(
+    node: &(String, u16),
+    client_id: &str,
+    username: &str,
+    password: &str,
+) -> Result<TestClient, String> {
     let mut opts = MqttOptions::new(client_id, &node.0, node.1);
     opts.set_credentials(username, password);
     opts.set_keep_alive(Duration::from_secs(10));
@@ -46,15 +51,17 @@ async fn connect(node: &(String, u16), client_id: &str, username: &str, password
     let connack = timeout(Duration::from_secs(15), async {
         loop {
             match eventloop.poll().await {
-                Ok(Event::Incoming(Packet::ConnAck(ack))) => return ack,
+                Ok(Event::Incoming(Packet::ConnAck(ack))) => return Ok(ack),
                 Ok(_) => {}
-                Err(e) => panic!("{client_id} connection failed: {e}"),
+                Err(e) => return Err(format!("{e}")),
             }
         }
     })
     .await
-    .expect("timed out waiting for connack");
-    assert_eq!(connack.code, ConnectReturnCode::Success, "{client_id} not accepted");
+    .map_err(|_| "timed out waiting for connack".to_string())??;
+    if connack.code != ConnectReturnCode::Success {
+        return Err(format!("not accepted: {:?}", connack.code));
+    }
     let (tx, rx) = mpsc::unbounded_channel();
     let (tx_sub, rx_sub) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -72,7 +79,22 @@ async fn connect(node: &(String, u16), client_id: &str, username: &str, password
             }
         }
     });
-    TestClient { client, msgs: rx, subacks: rx_sub }
+    Ok(TestClient { client, msgs: rx, subacks: rx_sub })
+}
+
+async fn connect(node: &(String, u16), client_id: &str, username: &str, password: &str) -> TestClient {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match try_connect(node, client_id, username, password).await {
+            Ok(tc) => return tc,
+            Err(e) => {
+                if tokio::time::Instant::now() >= deadline {
+                    panic!("{client_id} connection failed after retries: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
 }
 
 impl TestClient {
@@ -230,4 +252,44 @@ async fn cluster_cross_node() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_user_lifecycle() {
+    let nodes = nodes();
+    assert_eq!(nodes.len(), 3, "expected 3 nodes");
+    let apis = api_bases();
+    let token = token();
+    let http = reqwest::Client::new();
+
+    let user = unique("lc-u");
+    let userid = unique("lcid");
+
+    let resp = http
+        .post(format!("{}/api/v1/users", apis[1]))
+        .bearer_auth(&token)
+        .json(&json!({"username": user, "userid": userid, "password": "pw-lc"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create user via node2 api");
+
+    let dev1 = connect(&nodes[0], "lc-dev1", &user, "pw-lc").await;
+    let dev3 = connect(&nodes[2], "lc-dev3", &user, "pw-lc").await;
+    drop(dev1);
+    drop(dev3);
+
+    expect_rejected(&nodes[0], "lc-bad", &user, "nope").await;
+
+    let resp = http
+        .delete(format!("{}/api/v1/users/{user}", apis[0]))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "delete user via node1 api");
+
+    expect_rejected(&nodes[1], "lc-dev1b", &user, "pw-lc").await;
+    expect_rejected(&nodes[2], "lc-dev3b", &user, "pw-lc").await;
 }

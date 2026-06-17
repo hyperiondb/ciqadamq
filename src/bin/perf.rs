@@ -16,6 +16,9 @@ struct Settings {
     messages: u64,
     devices_per_user: usize,
     payload_size: usize,
+    publishers: usize,
+    inflight: u16,
+    channel_cap: usize,
     out: String,
 }
 
@@ -57,6 +60,9 @@ fn load_settings() -> Result<Settings> {
         messages: env_or("PERF_MSGS", "10000").parse()?,
         devices_per_user: env_or("PERF_DEVICES_PER_USER", "1").parse()?,
         payload_size: env_or("PERF_PAYLOAD", "256").parse()?,
+        publishers: env_or("PERF_PUBLISHERS", "8").parse()?,
+        inflight: env_or("PERF_INFLIGHT", "1000").parse()?,
+        channel_cap: env_or("PERF_CHANNEL", "2000").parse()?,
         out: env_or("PERF_OUT", "perf-results.svg"),
     })
 }
@@ -233,33 +239,68 @@ async fn run_round(s: &Settings, run_id: &str, subscribers: usize) -> Result<Rou
         subs.push(h.await??);
     }
 
-    let pub_node = &s.nodes[0];
-    let mut opts = MqttOptions::new(format!("perf-pub-{run_id}-{subscribers}"), &pub_node.0, pub_node.1);
-    opts.set_credentials(format!("tok-pub-{run_id}"), "perf-pass");
-    opts.set_keep_alive(Duration::from_secs(30));
-    let (publisher, mut pub_loop) = AsyncClient::new(opts, 512);
-    let pub_done = Arc::new(AtomicU64::new(0));
-    let pub_done2 = pub_done.clone();
-    tokio::spawn(async move {
-        loop {
-            match pub_loop.poll().await {
-                Ok(Event::Incoming(Packet::PubAck(_))) => {
-                    pub_done2.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-    });
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     let padding = "x".repeat(s.payload_size);
     let expected = s.messages * s.devices_per_user as u64;
+    let userids = Arc::new(userids);
+    let num_pubs = s.publishers.max(1);
+
+    let mut publishers = Vec::with_capacity(num_pubs);
+    for p in 0..num_pubs {
+        let node = &s.nodes[p % s.nodes.len()];
+        let mut opts = MqttOptions::new(format!("perf-pub-{run_id}-{subscribers}-{p}"), &node.0, node.1);
+        opts.set_credentials(format!("tok-pub-{run_id}"), "perf-pass");
+        opts.set_keep_alive(Duration::from_secs(30));
+        opts.set_inflight(s.inflight);
+        let (client, mut eventloop) = AsyncClient::new(opts, s.channel_cap);
+        timeout(Duration::from_secs(30), async {
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Packet::ConnAck(ack))) => {
+                        if ack.code != ConnectReturnCode::Success {
+                            return Err(anyhow!("publisher rejected: {:?}", ack.code));
+                        }
+                        return Ok(());
+                    }
+                    Ok(_) => {}
+                    Err(e) => return Err(anyhow!("publisher connect failed: {e}")),
+                }
+            }
+        })
+        .await
+        .context("publisher connack timeout")??;
+        tokio::spawn(async move {
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Outgoing(rumqttc::Outgoing::Disconnect)) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        publishers.push(client);
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let per = s.messages.div_ceil(num_pubs as u64);
     let start = Instant::now();
-    for seq in 0..s.messages {
-        let topic = format!("chat/{}/m/all", userids[(seq as usize) % users]);
-        let payload = format!("{}|{}", now_nanos(), padding);
-        publisher.publish(topic, QoS::AtLeastOnce, false, payload).await?;
+    let mut pub_tasks = Vec::with_capacity(num_pubs);
+    for (p, client) in publishers.iter().cloned().enumerate() {
+        let userids = userids.clone();
+        let padding = padding.clone();
+        let begin = p as u64 * per;
+        let end = ((p as u64 + 1) * per).min(s.messages);
+        pub_tasks.push(tokio::spawn(async move {
+            for seq in begin..end {
+                let topic = format!("chat/{}/m/all", userids[(seq as usize) % users]);
+                let payload = format!("{}|{}", now_nanos(), padding);
+                if client.publish(topic, QoS::AtLeastOnce, false, payload).await.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    for t in pub_tasks {
+        let _ = t.await;
     }
 
     let mut latencies: Vec<u64> = Vec::with_capacity(expected as usize);
@@ -289,7 +330,9 @@ async fn run_round(s: &Settings, run_id: &str, subscribers: usize) -> Result<Rou
     for sub in &subs {
         let _ = sub.client.disconnect().await;
     }
-    let _ = publisher.disconnect().await;
+    for client in &publishers {
+        let _ = client.disconnect().await;
+    }
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     latencies.sort_unstable();
