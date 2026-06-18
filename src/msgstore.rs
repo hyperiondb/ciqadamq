@@ -23,7 +23,7 @@ struct StoredMsg {
 }
 
 fn approx_size(m: &StoredMsg) -> usize {
-    m.publish.payload.len() + m.publish.topic.len() + 64
+    m.publish.payload.len() + m.publish.topic.len() + 384
 }
 
 struct MemState {

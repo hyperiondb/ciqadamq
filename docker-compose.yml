@@ -15,6 +15,8 @@ services:
       ARGON2_T_COST: "2"
       ARGON2_P_COST: "1"
       AUTH_HASH_CONCURRENCY: "4"
+      AUTH_DISABLED: "0"
+      AUTH_PEPPER: "dev-pepper-change-in-prod"
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
       - node1data:/app/data
@@ -44,6 +46,8 @@ services:
       ARGON2_T_COST: "2"
       ARGON2_P_COST: "1"
       AUTH_HASH_CONCURRENCY: "4"
+      AUTH_DISABLED: "0"
+      AUTH_PEPPER: "dev-pepper-change-in-prod"
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
       - node2data:/app/data
@@ -73,6 +77,8 @@ services:
       ARGON2_T_COST: "2"
       ARGON2_P_COST: "1"
       AUTH_HASH_CONCURRENCY: "4"
+      AUTH_DISABLED: "0"
+      AUTH_PEPPER: "dev-pepper-change-in-prod"
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
       - node3data:/app/data

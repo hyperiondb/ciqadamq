@@ -29,6 +29,8 @@ pub struct AppState {
     pub peers: Arc<Vec<String>>,
     pub http: reqwest::Client,
     pub auth_sem: Arc<tokio::sync::Semaphore>,
+    pub auth_disabled: bool,
+    pub pepper: Option<Arc<[u8]>>,
 }
 
 pub struct AuthCache {
@@ -173,6 +175,7 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
         return bad_request("password must be 1-512 bytes");
     }
     let password = req.password;
+    let verifier = state.pepper.as_ref().map(|p| db::compute_verifier(p, &req.username, &password));
     let _permit = state.auth_sem.clone().acquire_owned().await;
     let hash = match tokio::task::spawn_blocking(move || db::hash_password(&password)).await {
         Ok(Ok(h)) => h,
@@ -188,6 +191,9 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
     };
     match state.db.insert_user(user).await {
         Ok(true) => {
+            if let Some(v) = &verifier {
+                let _ = state.db.set_verifier(&req.username, v).await;
+            }
             let rec = UserRecord {
                 username: req.username.clone(),
                 userid: req.userid.clone(),
@@ -275,6 +281,9 @@ struct MqttAuth {
 
 impl MqttAuth {
     async fn authenticate(&self, connect_info: &ConnectInfo) -> ReturnType {
+        if self.state.auth_disabled {
+            return (false, Some(HookResult::AuthResult(AuthResult::Allow(true, None))));
+        }
         let username = connect_info.username().map(|u| u.to_string());
         let password =
             connect_info.password().and_then(|p| std::str::from_utf8(p).ok().map(|s| s.to_string()));
@@ -290,20 +299,30 @@ impl MqttAuth {
             Err(_) => return (false, Some(HookResult::AuthResult(AuthResult::NotAuthorized))),
         };
         let key = auth_key(&username, &password);
-        let verified = if self.state.auth_cache.get(&key).is_some() {
-            true
-        } else {
+        let mut verified = self.state.auth_cache.get(&key).is_some();
+        if !verified {
+            if let Some(pepper) = &self.state.pepper {
+                if let Ok(Some(v)) = self.state.db.get_verifier(&username).await {
+                    if db::verify_fast(pepper, &username, &password, &v) {
+                        self.state.auth_cache.insert(key.clone(), record.superuser);
+                        verified = true;
+                    }
+                }
+            }
+        }
+        if !verified {
             let _permit = self.state.auth_sem.clone().acquire_owned().await;
             let hash = record.password_hash.clone();
             let pw = password.clone();
-            match tokio::task::spawn_blocking(move || db::verify_password(&hash, &pw)).await {
-                Ok(true) => {
-                    self.state.auth_cache.insert(key, record.superuser);
-                    true
+            if let Ok(true) = tokio::task::spawn_blocking(move || db::verify_password(&hash, &pw)).await {
+                self.state.auth_cache.insert(key, record.superuser);
+                if let Some(pepper) = &self.state.pepper {
+                    let v = db::compute_verifier(pepper, &username, &password);
+                    let _ = self.state.db.set_verifier(&username, &v).await;
                 }
-                _ => false,
+                verified = true;
             }
-        };
+        }
         if !verified {
             return deny_auth();
         }

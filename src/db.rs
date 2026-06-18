@@ -3,6 +3,8 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -34,6 +36,8 @@ pub trait UserStore: Send + Sync {
     async fn delete_user(&self, username: &str) -> Result<bool>;
     async fn list_users(&self) -> Result<Vec<UserRecord>>;
     async fn get_user(&self, username: &str) -> Result<Option<UserRecord>>;
+    async fn get_verifier(&self, username: &str) -> Result<Option<String>>;
+    async fn set_verifier(&self, username: &str, verifier: &str) -> Result<()>;
 }
 
 pub async fn open(url: &str) -> Result<Arc<dyn UserStore>> {
@@ -69,7 +73,33 @@ pub fn verify_password(stored_hash: &str, password: &str) -> bool {
         .unwrap_or(false)
 }
 
+type HmacSha256 = Hmac<Sha256>;
+
+pub fn compute_verifier(pepper: &[u8], username: &str, password: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(pepper).expect("HMAC accepts any key length");
+    mac.update(username.as_bytes());
+    mac.update(b"\x00");
+    mac.update(password.as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn verify_fast(pepper: &[u8], username: &str, password: &str, stored: &str) -> bool {
+    ct_eq(compute_verifier(pepper, username, password).as_bytes(), stored.as_bytes())
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 const USERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
+const VERIFIERS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("verifiers");
 
 pub struct RedbStore {
     db: Arc<Database>,
@@ -86,6 +116,7 @@ impl RedbStore {
         let wtx = db.begin_write()?;
         {
             wtx.open_table(USERS_TABLE)?;
+            wtx.open_table(VERIFIERS_TABLE)?;
         }
         wtx.commit()?;
         Ok(Self { db: Arc::new(db) })
@@ -184,6 +215,10 @@ impl UserStore for RedbStore {
                 let mut t = wtx.open_table(USERS_TABLE)?;
                 t.remove(username.as_str())?.is_some()
             };
+            {
+                let mut vt = wtx.open_table(VERIFIERS_TABLE)?;
+                vt.remove(username.as_str())?;
+            }
             wtx.commit()?;
             Ok(existed)
         })
@@ -218,6 +253,34 @@ impl UserStore for RedbStore {
                 )),
                 None => Ok(None),
             }
+        })
+        .await
+    }
+
+    async fn get_verifier(&self, username: &str) -> Result<Option<String>> {
+        let username = username.to_owned();
+        self.run(move |db| {
+            let rtx = db.begin_read()?;
+            let t = rtx.open_table(VERIFIERS_TABLE)?;
+            match t.get(username.as_str())? {
+                Some(v) => Ok(Some(v.value().to_owned())),
+                None => Ok(None),
+            }
+        })
+        .await
+    }
+
+    async fn set_verifier(&self, username: &str, verifier: &str) -> Result<()> {
+        let username = username.to_owned();
+        let verifier = verifier.to_owned();
+        self.run(move |db| {
+            let wtx = db.begin_write()?;
+            {
+                let mut t = wtx.open_table(VERIFIERS_TABLE)?;
+                t.insert(username.as_str(), verifier.as_str())?;
+            }
+            wtx.commit()?;
+            Ok(())
         })
         .await
     }

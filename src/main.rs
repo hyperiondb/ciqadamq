@@ -66,6 +66,21 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .filter(|n| *n > 0)
         .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    let auth_disabled = std::env::var("AUTH_DISABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if auth_disabled {
+        log::warn!(
+            "AUTH_DISABLED set: MQTT auth and ACL are bypassed, all clients allowed as superuser (testing only)"
+        );
+    }
+    let pepper: Option<Arc<[u8]>> = std::env::var("AUTH_PEPPER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| Arc::from(s.into_bytes()));
+    if pepper.is_some() {
+        log::info!("AUTH_PEPPER set: fast password verifier enabled (argon2 used on first auth and as fallback)");
+    }
     let state = AppState {
         db: db.clone(),
         token: Arc::new(token),
@@ -75,6 +90,8 @@ async fn main() -> Result<()> {
         peers: Arc::new(peers),
         http: reqwest::Client::new(),
         auth_sem: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
+        auth_disabled,
+        pepper,
     };
     {
         let state = state.clone();

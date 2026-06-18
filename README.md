@@ -13,6 +13,7 @@ Status: **in production**
 - REST API to create/delete users (bearer token)
 - Messages queued for offline persistent sessions expire after 20 minutes (configurable)
 - No TLS — run behind HAProxy
+- Configurable auth, message persistence
 
 ## Performance
 
@@ -84,9 +85,7 @@ scripts\cluster-e2e.ps1           # compose up -> cross-node e2e -> compose down
 
 ## Performance tests
 
-Note. This tesst takes forever.
-
-Note. 100% cpu = 1 core.
+Note. 100% cpu = 1 core. 256 bytes payload.
 
 ```bash
 docker compose up -d --build
@@ -95,7 +94,7 @@ cargo run --release --features perf --bin perf
 
 Sweeps subscriber counts (`PERF_SUBS`, default `100,500,1000,2500,5000`), publishing `PERF_MSGS` (default 10000) messages round-robin to the users' `chat/{userid}/m/all` topics (`PERF_DEVICES_PER_USER` devices each, spread across all 3 nodes), and measures messages/sec delivered to end users plus p50/p95/p99 end-to-end latency. Writes `perf-results.svg` (chart) and `perf-results.csv`.
 
-Resource usage as subscribers scale, measured idle and under per-subscriber publish load:
+Resource usage as subscribers scale, measured idle and under per-subscriber publish load (64 bytes payload):
 
 ```bash
 docker compose up -d --build
