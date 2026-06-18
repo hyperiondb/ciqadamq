@@ -1,6 +1,6 @@
 [package]
 name = "ciqadamq"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Clustered MQTT broker built on RMQTT with a REST API for user management, per-user topic ACLs, and message expiry"
 authors = ["Tadas Talaikis <talaikis.tadas@gmail.com>"]
@@ -51,6 +51,7 @@ bincode = { version = "2.0.1", features = ["serde"] }
 env_logger = "0.11.10"
 hmac = "0.13.0"
 log = "0.4.32"
+mimalloc = "0.1.52"
 redb = "4.1.0"
 rmqtt = { version = "0.21.0", features = ["ws", "plugin", "auto-subscription", "grpc", "shared-subscription", "msgstore"] }
 rmqtt-cluster-raft = "0.21.0"
@@ -64,6 +65,10 @@ toml = "1.1.2"
 portpicker = "0.1.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25.1", default-features = false, features = ["url", "websocket"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
 
 [profile.profiling]
 inherits = "release"

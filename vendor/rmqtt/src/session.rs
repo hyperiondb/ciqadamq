@@ -1566,22 +1566,23 @@ impl SessionState {
         //hook, message_delivered
         let publish = self.hook.message_delivered(from.clone(), &publish).await.unwrap_or(publish);
 
-        //send message
-        sink.publish(
-            publish.clone(),
-            expiry_check_res.message_expiry_interval(),
-            self.server_topic_aliases.as_ref(),
-        )
-        .await?; //@TODO ... at exception, send hook and or store message
-
         //cache messages to inflight window
         let moment_status = match publish.qos {
             QoS::AtLeastOnce => Some(MomentStatus::UnAck),
             QoS::ExactlyOnce => Some(MomentStatus::UnReceived),
             _ => None,
         };
+        let inflight = moment_status.map(|status| (status, publish.clone()));
 
-        if let Some(moment_status) = moment_status {
+        //send message
+        sink.publish(
+            publish,
+            expiry_check_res.message_expiry_interval(),
+            self.server_topic_aliases.as_ref(),
+        )
+        .await?; //@TODO ... at exception, send hook and or store message
+
+        if let Some((moment_status, publish)) = inflight {
             self.out_inflight().write().await.push_back(OutInflightMessage::new(
                 moment_status,
                 from,

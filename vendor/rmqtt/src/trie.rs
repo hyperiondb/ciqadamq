@@ -253,7 +253,18 @@ impl VecToTopic for Vec<&Level> {
 
     #[inline]
     fn to_topic_filter(&self) -> TopicFilter {
-        TopicFilter::from(self.to_topic().to_string())
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        let mut first = true;
+        for level in self.iter() {
+            if first {
+                first = false;
+            } else {
+                s.push('/');
+            }
+            let _ = write!(s, "{}", level);
+        }
+        TopicFilter::from(s)
     }
 }
 
