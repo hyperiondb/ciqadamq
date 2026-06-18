@@ -23,9 +23,15 @@ Status: **in production**
 
 ![CiqadaMQ idle resource usage](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources.svg?raw=true)
 
+![CiqadaMQ idle resource usage per 1k users](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-peruser.svg?raw=true)
+
 ![CiqadaMQ resource usage, 10 msg/s QoS 1](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-qos1.svg?raw=true)
 
+![CiqadaMQ resource usage per 1k users, 10 msg/s QoS 1](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-qos1-peruser.svg?raw=true)
+
 ![CiqadaMQ resource usage, 10 msg/s QoS 2](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-qos2.svg?raw=true)
+
+![CiqadaMQ resource usage per 1k users, 10 msg/s QoS 2](https://github.com/hyperiondb/ciqadamq/blob/main/perf-resources-qos2-peruser.svg?raw=true)
 
 ## Identity model (matches server-backend)
 

@@ -51,6 +51,10 @@ fn env_u32(key: &str, default: u32) -> u32 {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+pub fn redb_cache_bytes() -> usize {
+    std::env::var("REDB_CACHE_BYTES").ok().and_then(|s| s.parse().ok()).unwrap_or(64 * 1024 * 1024)
+}
+
 pub fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let params = Params::new(
@@ -122,7 +126,10 @@ impl RedbStore {
                 std::fs::create_dir_all(dir)?;
             }
         }
-        let db = Database::create(path).context("opening redb database")?;
+        let db = Database::builder()
+            .set_cache_size(redb_cache_bytes())
+            .create(path)
+            .context("opening redb database")?;
         let wtx = db.begin_write()?;
         {
             wtx.open_table(USERS_TABLE)?;

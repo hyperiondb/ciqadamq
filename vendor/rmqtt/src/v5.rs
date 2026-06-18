@@ -84,7 +84,7 @@ where
             Err((ack_code, e)) => {
                 refused_ack(&scx, &mut sink, None, ack_code, e.to_string()).await?;
                 if let Err(e) = sink.close().await {
-                    log::info!("{lid} close io error, {e:?}");
+                    log::error!("{lid} close io error, {e:?}");
                 }
                 return Err(e);
             }

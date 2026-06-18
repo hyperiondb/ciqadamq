@@ -80,7 +80,10 @@ impl RedbMessageStore {
                 std::fs::create_dir_all(dir)?;
             }
         }
-        let db = Database::create(path).context("opening redb message store")?;
+        let db = Database::builder()
+            .set_cache_size(crate::db::redb_cache_bytes())
+            .create(path)
+            .context("opening redb message store")?;
         let wtx = db.begin_write()?;
         {
             wtx.open_table(MESSAGES)?;

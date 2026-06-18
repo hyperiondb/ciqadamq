@@ -490,18 +490,25 @@ async fn main() -> Result<()> {
         for svc in &s.services {
             csv.push_str(&format!(",{svc}_cpu_pct,{svc}_mem_mb"));
         }
-        csv.push_str(",total_cpu_pct,total_mem_mb,msg_per_sec,cpu_pct_per_1k_msgs\n");
+        csv.push_str(",total_cpu_pct,total_mem_mb,msg_per_sec,cpu_pct_per_1k_msgs,cpu_pct_per_1k_users,mem_mb_per_1k_users\n");
         for r in res {
             csv.push_str(&r.subscribers.to_string());
             for i in 0..s.services.len() {
                 csv.push_str(&format!(",{:.2},{:.2}", r.cpu_pct[i], r.mem_mb[i]));
             }
             let cpu_per_1k = if r.msg_per_sec > 0.0 { r.cpu_total_pct * 1000.0 / r.msg_per_sec } else { 0.0 };
-            csv.push_str(&format!(",{:.2},{:.2},{:.0},{:.2}\n", r.cpu_total_pct, r.mem_total_mb, r.msg_per_sec, cpu_per_1k));
+            let cpu_per_1k_users = if r.subscribers > 0 { r.cpu_total_pct / (r.subscribers as f64 / 1000.0) } else { 0.0 };
+            let mem_per_1k_users = if r.subscribers > 0 { r.mem_total_mb / (r.subscribers as f64 / 1000.0) } else { 0.0 };
+            csv.push_str(&format!(
+                ",{:.2},{:.2},{:.0},{:.2},{:.2},{:.2}\n",
+                r.cpu_total_pct, r.mem_total_mb, r.msg_per_sec, cpu_per_1k, cpu_per_1k_users, mem_per_1k_users
+            ));
         }
+        let peruser_path = svg_path.replace(".svg", "-peruser.svg");
         std::fs::write(&csv_path, csv)?;
         std::fs::write(&svg_path, render_svg(&s.services, res, &scenario.label))?;
-        println!("wrote {svg_path} and {csv_path}");
+        std::fs::write(&peruser_path, render_peruser_svg(res, &scenario.label))?;
+        println!("wrote {svg_path}, {peruser_path} and {csv_path}");
     }
     Ok(())
 }
@@ -518,17 +525,45 @@ fn render_svg(services: &[String], results: &[LevelResult], label: &str) -> Stri
     cpu_series.push(("total".into(), "#d62728", results.iter().map(|r| r.cpu_total_pct).collect()));
     mem_series.push(("total".into(), "#d62728", results.iter().map(|r| r.mem_total_mb).collect()));
 
+    let xs: Vec<f64> = results.iter().map(|r| r.subscribers as f64).collect();
+    let cpu_title = format!("broker cpu usage on {label} (%, docker stats)");
+    let mem_title = format!("broker memory usage on {label} (MB)");
+    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] =
+        [(cpu_title.as_str(), &cpu_series), (mem_title.as_str(), &mem_series)];
+    render_panels(&panels, &xs)
+}
+
+fn render_peruser_svg(results: &[LevelResult], label: &str) -> String {
+    let per_msg = |total: f64, msg_per_sec: f64| if msg_per_sec > 0.0 { total * 1000.0 / msg_per_sec } else { 0.0 };
+    let cpu_series: Vec<(String, &str, Vec<f64>)> = vec![(
+        "cpu%/1k msgs".into(),
+        "#1f77b4",
+        results.iter().map(|r| per_msg(r.cpu_total_pct, r.msg_per_sec)).collect(),
+    )];
+    let mem_series: Vec<(String, &str, Vec<f64>)> = vec![(
+        "MB/1k msgs".into(),
+        "#2ca02c",
+        results.iter().map(|r| per_msg(r.mem_total_mb, r.msg_per_sec)).collect(),
+    )];
+    let xs: Vec<f64> = results.iter().map(|r| r.subscribers as f64).collect();
+    let cpu_title = format!("broker cpu per 1k msgs on {label} (%)");
+    let mem_title = format!("broker memory per 1k msgs on {label} (MB)");
+    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] =
+        [(cpu_title.as_str(), &cpu_series), (mem_title.as_str(), &mem_series)];
+    render_panels(&panels, &xs)
+}
+
+fn render_panels(panels: &[(&str, &Vec<(String, &str, Vec<f64>)>)], xs: &[f64]) -> String {
     let w = 860.0;
     let panel_h = 300.0;
-    let h = panel_h * 2.0 + 60.0;
     let ml = 80.0;
     let mr = 30.0;
     let mt = 40.0;
     let gap = 70.0;
     let plot_w = w - ml - mr;
     let plot_h = panel_h - mt - 30.0;
+    let h = panel_h * panels.len() as f64 + 60.0;
 
-    let xs: Vec<f64> = results.iter().map(|r| r.subscribers as f64).collect();
     let x_max = xs.iter().cloned().fold(1.0, f64::max) * 1.05;
     let x_pos = |v: f64| ml + v / x_max * plot_w;
 
@@ -537,11 +572,6 @@ fn render_svg(services: &[String], results: &[LevelResult], label: &str) -> Stri
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" font-family="monospace" font-size="12">"#
     ));
     svg.push_str(&format!(r#"<rect width="{w}" height="{h}" fill="white"/>"#));
-
-    let cpu_title = format!("broker cpu usage on {label} (%, docker stats)");
-    let mem_title = format!("broker memory usage on {label} (MB)");
-    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] =
-        [(cpu_title.as_str(), &cpu_series), (mem_title.as_str(), &mem_series)];
 
     for (panel_idx, (title, series)) in panels.iter().enumerate() {
         let top = mt + panel_idx as f64 * (panel_h + gap - mt);
@@ -578,7 +608,7 @@ fn render_svg(services: &[String], results: &[LevelResult], label: &str) -> Stri
                 format_tick(yv)
             ));
         }
-        for x in &xs {
+        for x in xs {
             let xp = x_pos(*x);
             svg.push_str(&format!(
                 r#"<text x="{xp}" y="{}" text-anchor="middle">{}</text>"#,

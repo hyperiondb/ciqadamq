@@ -17,6 +17,7 @@ services:
       AUTH_HASH_CONCURRENCY: "4"
       AUTH_DISABLED: "0"
       AUTH_PEPPER: "dev-pepper-change-in-prod"
+      REDB_CACHE_BYTES: "67108864"
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
       - node1data:/app/data
@@ -48,6 +49,7 @@ services:
       AUTH_HASH_CONCURRENCY: "4"
       AUTH_DISABLED: "0"
       AUTH_PEPPER: "dev-pepper-change-in-prod"
+      REDB_CACHE_BYTES: "67108864"
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
       - node2data:/app/data
@@ -79,6 +81,7 @@ services:
       AUTH_HASH_CONCURRENCY: "4"
       AUTH_DISABLED: "0"
       AUTH_PEPPER: "dev-pepper-change-in-prod"
+      REDB_CACHE_BYTES: "67108864"
     volumes:
       - ./docker/cluster.toml:/app/cluster.toml:ro
       - node3data:/app/data

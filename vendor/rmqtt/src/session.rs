@@ -197,7 +197,7 @@ impl SessionState {
         self.scx.connections.dec();
 
         if let Err(e) = sink.close().await {
-            log::info!("{} close io error, {e:?}", self.id);
+            log::error!("{} close io error, {e:?}", self.id);
         }
 
         let disconnect = self.disconnect().await.unwrap_or(None);
