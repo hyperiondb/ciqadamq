@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use rmqtt::message::MessageManager;
 use rmqtt::types::{ClientId, From as MsgFrom, MsgID, Publish, SharedGroup, TopicFilter};
 use rmqtt::Result as RmqttResult;
@@ -13,6 +13,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const COUNTER_MASK: u64 = 0xFFFF_FFFF_FFFF;
 const MESSAGES: TableDefinition<u64, &[u8]> = TableDefinition::new("messages");
+
+fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(v, bincode::config::standard()).map_err(|e| anyhow!("bincode encode: {e}"))
+}
+
+fn dec<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow!("bincode decode: {e}"))
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredMsg {
@@ -92,7 +102,7 @@ impl RedbMessageStore {
                         start = c;
                     }
                 }
-                if let Ok(msg) = bincode::deserialize::<StoredMsg>(v.value()) {
+                if let Ok(msg) = dec::<StoredMsg>(v.value()) {
                     if msg.expiry_at > now {
                         msgs.insert(id, msg);
                     }
@@ -139,7 +149,7 @@ impl RedbMessageStore {
             let mut batch = Vec::with_capacity(dirty.len());
             for id in dirty {
                 if let Some(m) = st.msgs.get(&id) {
-                    match bincode::serialize(m) {
+                    match enc(m) {
                         Ok(bytes) => batch.push((id, bytes)),
                         Err(e) => log::warn!("message store encode failed: {e}"),
                     }

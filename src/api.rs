@@ -248,7 +248,7 @@ async fn list_users(State(state): State<AppState>) -> Response {
 
 fn auth_key(username: &str, password: &str) -> (String, [u8; 32]) {
     let mut hash = [0u8; 32];
-    hash.copy_from_slice(Sha256::digest(password.as_bytes()).as_slice());
+    hash.copy_from_slice(&Sha256::digest(password.as_bytes()));
     (username.to_string(), hash)
 }
 

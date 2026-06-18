@@ -3,9 +3,9 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -98,6 +98,16 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(v, bincode::config::standard()).map_err(|e| anyhow!("bincode encode: {e}"))
+}
+
+fn dec<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+        .map(|(v, _)| v)
+        .map_err(|e| anyhow!("bincode decode: {e}"))
+}
+
 const USERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
 const VERIFIERS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("verifiers");
 
@@ -143,7 +153,7 @@ impl UserStore for RedbStore {
                 superuser: user.superuser,
                 admin: user.admin,
             };
-            let bytes = bincode::serialize(&rec).map_err(|e| anyhow!("encode user: {e}"))?;
+            let bytes = enc(&rec)?;
             let wtx = db.begin_write()?;
             let inserted = {
                 let mut t = wtx.open_table(USERS_TABLE)?;
@@ -169,7 +179,7 @@ impl UserStore for RedbStore {
                 superuser: user.superuser,
                 admin: user.admin,
             };
-            let bytes = bincode::serialize(&rec).map_err(|e| anyhow!("encode user: {e}"))?;
+            let bytes = enc(&rec)?;
             let wtx = db.begin_write()?;
             {
                 let mut t = wtx.open_table(USERS_TABLE)?;
@@ -197,7 +207,7 @@ impl UserStore for RedbStore {
                         superuser: user.superuser,
                         admin: user.admin,
                     };
-                    let bytes = bincode::serialize(&rec).map_err(|e| anyhow!("encode user: {e}"))?;
+                    let bytes = enc(&rec)?;
                     t.insert(rec.username.as_str(), bytes.as_slice())?;
                 }
             }
@@ -233,7 +243,7 @@ impl UserStore for RedbStore {
             for item in t.iter()? {
                 let (_, v) = item?;
                 let rec: UserRecord =
-                    bincode::deserialize(v.value()).map_err(|e| anyhow!("decode user: {e}"))?;
+                    dec(v.value())?;
                 out.push(rec);
             }
             out.sort_by(|a, b| a.username.cmp(&b.username));
@@ -249,7 +259,7 @@ impl UserStore for RedbStore {
             let t = rtx.open_table(USERS_TABLE)?;
             match t.get(username.as_str())? {
                 Some(v) => Ok(Some(
-                    bincode::deserialize(v.value()).map_err(|e| anyhow!("decode user: {e}"))?,
+                    dec(v.value())?,
                 )),
                 None => Ok(None),
             }
