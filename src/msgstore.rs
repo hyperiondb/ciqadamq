@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use rmqtt::message::MessageManager;
-use rmqtt::types::{ClientId, From as MsgFrom, MsgID, Publish, SharedGroup, TopicFilter};
+use rmqtt::types::{ClientId, From as MsgFrom, MsgID, Publish, SharedGroup, TopicFilter, TopicName};
 use rmqtt::Result as RmqttResult;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -29,7 +29,7 @@ struct StoredMsg {
     from: MsgFrom,
     publish: Publish,
     expiry_at: i64,
-    delivered_to: Vec<String>,
+    delivered_to: HashSet<String>,
 }
 
 fn approx_size(m: &StoredMsg) -> usize {
@@ -39,6 +39,7 @@ fn approx_size(m: &StoredMsg) -> usize {
 struct MemState {
     msgs: HashMap<u64, StoredMsg>,
     order: VecDeque<u64>,
+    by_topic: HashMap<TopicName, HashSet<u64>>,
     bytes: usize,
     dirty: HashSet<u64>,
     removed: HashSet<u64>,
@@ -58,6 +59,12 @@ impl MemState {
                 self.bytes = self.bytes.saturating_sub(approx_size(&m));
                 self.dirty.remove(&id);
                 self.removed.insert(id);
+                if let Some(ids) = self.by_topic.get_mut(&m.publish.topic) {
+                    ids.remove(&id);
+                    if ids.is_empty() {
+                        self.by_topic.remove(&m.publish.topic);
+                    }
+                }
             }
         }
     }
@@ -71,6 +78,7 @@ pub struct RedbMessageStore {
     state: Arc<Mutex<MemState>>,
     max_msgs: usize,
     max_bytes: usize,
+    tx: tokio::sync::mpsc::UnboundedSender<(u64, StoredMsg)>,
 }
 
 impl RedbMessageStore {
@@ -116,6 +124,10 @@ impl RedbMessageStore {
         entries.sort_unstable();
         let order: VecDeque<u64> = entries.into_iter().map(|(_, id)| id).collect();
         let bytes: usize = msgs.values().map(approx_size).sum();
+        let mut by_topic: HashMap<TopicName, HashSet<u64>> = HashMap::new();
+        for (id, m) in &msgs {
+            by_topic.entry(m.publish.topic.clone()).or_default().insert(*id);
+        }
 
         let max_msgs = std::env::var("MSG_MAX_MSGS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         let max_bytes = std::env::var("MSG_MAX_BYTES")
@@ -124,19 +136,48 @@ impl RedbMessageStore {
             .unwrap_or(256 * 1024 * 1024);
         log::info!("message store memory cap: max_msgs={max_msgs} max_bytes={max_bytes} (0 = unbounded)");
 
+        let state = Arc::new(Mutex::new(MemState {
+            msgs,
+            order,
+            by_topic,
+            bytes,
+            dirty: HashSet::new(),
+            removed: HashSet::new(),
+        }));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, StoredMsg)>();
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                while let Some((key, msg)) = rx.recv().await {
+                    let now = now_millis();
+                    let size = approx_size(&msg);
+                    let topic = msg.publish.topic.clone();
+                    if let Ok(mut st) = state.lock() {
+                        st.removed.remove(&key);
+                        match st.msgs.insert(key, msg) {
+                            Some(old) => {
+                                st.bytes = st.bytes.saturating_sub(approx_size(&old)).saturating_add(size);
+                            }
+                            None => {
+                                st.order.push_back(key);
+                                st.bytes = st.bytes.saturating_add(size);
+                            }
+                        }
+                        st.by_topic.entry(topic).or_default().insert(key);
+                        st.dirty.insert(key);
+                        st.evict(now, max_msgs, max_bytes);
+                    }
+                }
+            });
+        }
         Ok(Self {
             db: Arc::new(db),
             node_id,
             counter: Arc::new(AtomicU64::new(start)),
-            state: Arc::new(Mutex::new(MemState {
-                msgs,
-                order,
-                bytes,
-                dirty: HashSet::new(),
-                removed: HashSet::new(),
-            })),
+            state,
             max_msgs,
             max_bytes,
+            tx,
         })
     }
 
@@ -204,6 +245,10 @@ fn topic_matches(topic: &str, filter: &str) -> bool {
     }
 }
 
+fn has_wildcard(filter: &str) -> bool {
+    filter.bytes().any(|b| b == b'+' || b == b'#')
+}
+
 #[async_trait]
 impl MessageManager for RedbMessageStore {
     fn enable(&self) -> bool {
@@ -225,28 +270,14 @@ impl MessageManager for RedbMessageStore {
     ) -> RmqttResult<()> {
         let now = now_millis();
         let expiry_at = now.saturating_add(expiry_interval.as_millis() as i64);
-        let delivered_to: Vec<String> = sub_client_ids
+        let delivered_to: HashSet<String> = sub_client_ids
             .unwrap_or_default()
             .into_iter()
             .map(|(cid, _)| cid.to_string())
             .collect();
         let key = msg_id as u64;
         let msg = StoredMsg { from, publish: p, expiry_at, delivered_to };
-        let size = approx_size(&msg);
-        if let Ok(mut st) = self.state.lock() {
-            st.removed.remove(&key);
-            match st.msgs.insert(key, msg) {
-                Some(old) => {
-                    st.bytes = st.bytes.saturating_sub(approx_size(&old)).saturating_add(size);
-                }
-                None => {
-                    st.order.push_back(key);
-                    st.bytes = st.bytes.saturating_add(size);
-                }
-            }
-            st.dirty.insert(key);
-            st.evict(now, self.max_msgs, self.max_bytes);
-        }
+        let _ = self.tx.send((key, msg));
         Ok(())
     }
 
@@ -260,20 +291,30 @@ impl MessageManager for RedbMessageStore {
         let mut out = Vec::new();
         if let Ok(mut st) = self.state.lock() {
             st.evict(now, self.max_msgs, self.max_bytes);
+            let candidates: Vec<u64> = if has_wildcard(topic_filter) {
+                st.by_topic
+                    .iter()
+                    .filter_map(|(t, ids)| topic_matches(t.as_ref(), topic_filter).then_some(ids))
+                    .flatten()
+                    .copied()
+                    .collect()
+            } else {
+                let key = TopicName::from(topic_filter.to_owned());
+                st.by_topic.get(&key).map(|ids| ids.iter().copied().collect()).unwrap_or_default()
+            };
             let mut touched = Vec::new();
-            for (id, msg) in st.msgs.iter() {
-                if msg.expiry_at <= now || msg.delivered_to.iter().any(|c| c == client_id) {
-                    continue;
+            for id in candidates {
+                if let Some(msg) = st.msgs.get(&id) {
+                    if msg.expiry_at <= now || msg.delivered_to.contains(client_id) {
+                        continue;
+                    }
+                    out.push((id as MsgID, msg.from.clone(), msg.publish.clone()));
+                    touched.push(id);
                 }
-                if !topic_matches(&msg.publish.topic, topic_filter) {
-                    continue;
-                }
-                out.push((*id as MsgID, msg.from.clone(), msg.publish.clone()));
-                touched.push(*id);
             }
             for id in touched {
                 if let Some(m) = st.msgs.get_mut(&id) {
-                    m.delivered_to.push(client_id.to_string());
+                    m.delivered_to.insert(client_id.to_string());
                 }
                 st.dirty.insert(id);
             }
@@ -282,9 +323,8 @@ impl MessageManager for RedbMessageStore {
     }
 
     async fn count(&self) -> isize {
-        let now = now_millis();
         match self.state.lock() {
-            Ok(st) => st.msgs.values().filter(|m| m.expiry_at > now).count() as isize,
+            Ok(st) => st.msgs.len() as isize,
             Err(_) => -1,
         }
     }
