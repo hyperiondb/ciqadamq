@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         auth_cache,
         users: user_cache,
         peers: Arc::new(peers),
-        http: reqwest::Client::new(),
+        http: reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap_or_default(),
         auth_sem: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
         auth_disabled,
         pepper,
