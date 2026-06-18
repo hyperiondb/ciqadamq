@@ -34,7 +34,7 @@ use base64::prelude::{Engine, BASE64_STANDARD};
 use bitflags::bitflags;
 use bytes::Bytes;
 use bytestring::ByteString;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use get_size::GetSize;
 use itertools::Itertools;
 use rmqtt_codec::cert::CertInfo;
@@ -1367,7 +1367,7 @@ where
     ) -> Result<()> {
         match self {
             Sink::V3(s) => {
-                s.send_publish(p.take()).await?;
+                s.io.feed(codec::MqttPacket::V3(codec::v3::Packet::Publish(p.take()))).await?;
             }
             Sink::V5(s) => {
                 let (topic, alias) = {
@@ -1384,10 +1384,18 @@ where
                     properties.message_expiry_interval = message_expiry_interval;
                     properties.topic_alias = alias;
                 }
-                s.send_publish(p.take()).await?;
+                s.io.feed(codec::MqttPacket::V5(codec::v5::Packet::Publish(p.take()))).await?;
             }
         }
         Ok(())
+    }
+
+    #[inline]
+    pub(crate) async fn flush(&mut self) -> Result<()> {
+        match self {
+            Sink::V3(s) => s.flush().await,
+            Sink::V5(s) => s.flush().await,
+        }
     }
 
     #[inline]

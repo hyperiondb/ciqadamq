@@ -73,7 +73,7 @@ use async_trait::async_trait;
 use bitflags::Flags;
 use bytestring::ByteString;
 use futures::channel::mpsc::unbounded;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -353,6 +353,13 @@ impl SessionState {
                     match deliver_packet {
                         Some(Some((from, p))) => {
                             state.deliver(sink, from, p).await?;
+                            while state.out_inflight().read().await.has_credit() {
+                                match deliver_queue_rx.next().now_or_never() {
+                                    Some(Some(Some((from, p)))) => state.deliver(sink, from, p).await?,
+                                    _ => break,
+                                }
+                            }
+                            sink.flush().await?;
                         },
                         Some(None) => {
                             log::warn!("{:?} No messages received from the delivery queue", state.id);
