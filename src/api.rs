@@ -34,7 +34,7 @@ pub struct AppState {
 }
 
 pub struct AuthCache {
-    map: RwLock<HashMap<(String, [u8; 32]), (bool, Instant)>>,
+    map: RwLock<HashMap<[u8; 32], (bool, Instant)>>,
     ttl: Duration,
 }
 
@@ -43,7 +43,7 @@ impl AuthCache {
         Self { map: RwLock::new(HashMap::new()), ttl }
     }
 
-    fn get(&self, key: &(String, [u8; 32])) -> Option<bool> {
+    fn get(&self, key: &[u8; 32]) -> Option<bool> {
         let guard = self.map.read().ok()?;
         let (superuser, expiry) = *guard.get(key)?;
         if expiry > Instant::now() {
@@ -53,7 +53,7 @@ impl AuthCache {
         }
     }
 
-    fn insert(&self, key: (String, [u8; 32]), superuser: bool) {
+    fn insert(&self, key: [u8; 32], superuser: bool) {
         if self.ttl.is_zero() {
             return;
         }
@@ -62,9 +62,9 @@ impl AuthCache {
         }
     }
 
-    pub fn purge_user(&self, username: &str) {
+    pub fn purge_user(&self, _username: &str) {
         if let Ok(mut guard) = self.map.write() {
-            guard.retain(|(u, _), _| u != username);
+            guard.clear();
         }
     }
 
@@ -246,10 +246,14 @@ async fn list_users(State(state): State<AppState>) -> Response {
     }
 }
 
-fn auth_key(username: &str, password: &str) -> (String, [u8; 32]) {
+fn auth_key(username: &str, password: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(username.as_bytes());
+    h.update(b"\x00");
+    h.update(password.as_bytes());
     let mut hash = [0u8; 32];
-    hash.copy_from_slice(&Sha256::digest(password.as_bytes()));
-    (username.to_string(), hash)
+    hash.copy_from_slice(&h.finalize());
+    hash
 }
 
 async fn lookup_user(state: &AppState, username: &str) -> Result<Option<UserRecord>, Response> {

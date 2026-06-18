@@ -36,8 +36,8 @@ pub trait UserStore: Send + Sync {
     async fn delete_user(&self, username: &str) -> Result<bool>;
     async fn list_users(&self) -> Result<Vec<UserRecord>>;
     async fn get_user(&self, username: &str) -> Result<Option<UserRecord>>;
-    async fn get_verifier(&self, username: &str) -> Result<Option<String>>;
-    async fn set_verifier(&self, username: &str, verifier: &str) -> Result<()>;
+    async fn get_verifier(&self, username: &str) -> Result<Option<Vec<u8>>>;
+    async fn set_verifier(&self, username: &str, verifier: &[u8]) -> Result<()>;
 }
 
 pub async fn open(url: &str) -> Result<Arc<dyn UserStore>> {
@@ -79,16 +79,21 @@ pub fn verify_password(stored_hash: &str, password: &str) -> bool {
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn compute_verifier(pepper: &[u8], username: &str, password: &str) -> String {
+pub fn compute_verifier(pepper: &[u8], username: &str, password: &str) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(pepper).expect("HMAC accepts any key length");
     mac.update(username.as_bytes());
     mac.update(b"\x00");
     mac.update(password.as_bytes());
-    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+    let out = mac.finalize().into_bytes();
+    let mut verifier = [0u8; 32];
+    for (dst, src) in verifier.iter_mut().zip(out.iter()) {
+        *dst = *src;
+    }
+    verifier
 }
 
-pub fn verify_fast(pepper: &[u8], username: &str, password: &str, stored: &str) -> bool {
-    ct_eq(compute_verifier(pepper, username, password).as_bytes(), stored.as_bytes())
+pub fn verify_fast(pepper: &[u8], username: &str, password: &str, stored: &[u8]) -> bool {
+    ct_eq(&compute_verifier(pepper, username, password), stored)
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -113,7 +118,7 @@ fn dec<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 }
 
 const USERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
-const VERIFIERS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("verifiers");
+const VERIFIERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("verifiers2");
 
 pub struct RedbStore {
     db: Arc<Database>,
@@ -274,27 +279,27 @@ impl UserStore for RedbStore {
         .await
     }
 
-    async fn get_verifier(&self, username: &str) -> Result<Option<String>> {
+    async fn get_verifier(&self, username: &str) -> Result<Option<Vec<u8>>> {
         let username = username.to_owned();
         self.run(move |db| {
             let rtx = db.begin_read()?;
             let t = rtx.open_table(VERIFIERS_TABLE)?;
             match t.get(username.as_str())? {
-                Some(v) => Ok(Some(v.value().to_owned())),
+                Some(v) => Ok(Some(v.value().to_vec())),
                 None => Ok(None),
             }
         })
         .await
     }
 
-    async fn set_verifier(&self, username: &str, verifier: &str) -> Result<()> {
+    async fn set_verifier(&self, username: &str, verifier: &[u8]) -> Result<()> {
         let username = username.to_owned();
-        let verifier = verifier.to_owned();
+        let verifier = verifier.to_vec();
         self.run(move |db| {
             let wtx = db.begin_write()?;
             {
                 let mut t = wtx.open_table(VERIFIERS_TABLE)?;
-                t.insert(username.as_str(), verifier.as_str())?;
+                t.insert(username.as_str(), verifier.as_slice())?;
             }
             wtx.commit()?;
             Ok(())
