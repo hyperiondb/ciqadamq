@@ -95,6 +95,8 @@ async fn main() -> Result<()> {
         auth_sem: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
         auth_disabled,
         pepper,
+        cluster: Arc::new(cfg.cluster.clone()),
+        scx: Arc::new(std::sync::OnceLock::new()),
     };
     {
         let state = state.clone();
@@ -120,6 +122,7 @@ async fn main() -> Result<()> {
             .plugins_config_map_add("rmqtt-cluster-raft", cluster_raft_plugin_config(&cfg.cluster));
     }
     let scx = scx_builder.build().await;
+    let _ = state.scx.set(scx.clone());
 
     let _auth_reg = api::register_auth_hooks(&scx, state.clone()).await;
 

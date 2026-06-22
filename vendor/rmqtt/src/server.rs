@@ -321,10 +321,11 @@ async fn listen_ws(scx: ServerContext, l: &Listener, lid: ListenerId) {
                 tokio::spawn(async move {
                     log::debug!("WebSocket connection from {}", accept.remote_addr);
 
+                    let remote_addr = accept.remote_addr.to_string();
                     let stream = match accept.ws().await {
                         Ok(s) => s,
                         Err(e) => {
-                            log::warn!("WebSocket accept error: {e:?}");
+                            log::warn!("WebSocket accept error from {remote_addr}: {e:?}");
                             return;
                         }
                     };

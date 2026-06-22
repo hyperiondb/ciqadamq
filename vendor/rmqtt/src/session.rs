@@ -73,7 +73,7 @@ use async_trait::async_trait;
 use bitflags::Flags;
 use bytestring::ByteString;
 use futures::channel::mpsc::unbounded;
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -184,20 +184,30 @@ impl SessionState {
         let mut flags = StateFlags::empty();
 
         self.scx.connections.inc();
+        let mut abnormal_disconnect = false;
         match self.run_loop(&mut sink, keep_alive, &mut flags, &deliver_queue_tx, &mut deliver_queue_rx).await
         {
             Ok(()) => {
                 log::debug!("{} exit ...", self.id);
             }
             Err(reason) => {
-                log::debug!("{} Reason: {}", self.id, reason);
+                abnormal_disconnect = matches!(&reason, Reason::ProtocolError(_) | Reason::MqttError(_));
+                if abnormal_disconnect {
+                    log::warn!("client {} disconnected abnormally: {}", self.id.client_id, reason);
+                } else {
+                    log::info!("client {} disconnected: {}", self.id.client_id, reason);
+                }
                 let _ = self.disconnected_reason_add(reason).await;
             }
         }
         self.scx.connections.dec();
 
         if let Err(e) = sink.close().await {
-            log::error!("{} close io error, {e:?}", self.id);
+            if abnormal_disconnect {
+                log::error!("{} close io error, {e:?}", self.id);
+            } else {
+                log::debug!("{} close io error, {e:?}", self.id);
+            }
         }
 
         let disconnect = self.disconnect().await.unwrap_or(None);
@@ -353,12 +363,6 @@ impl SessionState {
                     match deliver_packet {
                         Some(Some((from, p))) => {
                             state.deliver(sink, from, p).await?;
-                            while state.out_inflight().read().await.has_credit() {
-                                match deliver_queue_rx.next().now_or_never() {
-                                    Some(Some(Some((from, p)))) => state.deliver(sink, from, p).await?,
-                                    _ => break,
-                                }
-                            }
                             sink.flush().await?;
                         },
                         Some(None) => {

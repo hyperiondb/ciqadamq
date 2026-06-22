@@ -178,6 +178,19 @@ impl TestClient {
             .expect("client channel closed")
     }
 
+    async fn recv_n(&mut self, n: usize) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(
+                timeout(Duration::from_secs(15), self.msgs.recv())
+                    .await
+                    .expect("timed out waiting for burst message")
+                    .expect("client channel closed"),
+            );
+        }
+        out
+    }
+
     async fn expect_silence(&mut self) {
         if let Ok(Some((topic, _))) = timeout(Duration::from_secs(2), self.msgs.recv()).await {
             panic!("unexpected message on {topic}");
@@ -466,4 +479,229 @@ async fn offline_messages_expire() {
 
     let mut dev_e = connect_persistent(broker.tcp_port, "devE", "tok-e", "pw-e").await;
     dev_e.expect_silence().await;
+}
+
+async fn start_cluster() -> Vec<Broker> {
+    const N: usize = 3;
+    let mqtt: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
+    let ws: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
+    let api: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
+    let grpc: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
+    let raft: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
+    let node_grpc =
+        (0..N).map(|i| format!("\"{}@127.0.0.1:{}\"", i + 1, grpc[i])).collect::<Vec<_>>().join(", ");
+    let raft_peers =
+        (0..N).map(|i| format!("\"{}@127.0.0.1:{}\"", i + 1, raft[i])).collect::<Vec<_>>().join(", ");
+
+    let mut brokers = Vec::new();
+    for i in 0..N {
+        let dir = std::env::temp_dir().join(format!("ciqadamq-cluster-{}-{}", api[i], mqtt[i]));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("users.redb").to_string_lossy().replace('\\', "/");
+        let cfg = format!(
+            r#"
+[mqtt]
+tcp_addr = "127.0.0.1:{}"
+ws_addr = "127.0.0.1:{}"
+message_expiry_secs = 1200
+
+[api]
+addr = "127.0.0.1:{}"
+token = "test-token"
+
+[db]
+url = "redb://{db_path}"
+
+[cluster]
+enabled = true
+node_id = {}
+grpc_laddr = "127.0.0.1:{}"
+raft_laddr = "127.0.0.1:{}"
+node_grpc_addrs = [{node_grpc}]
+raft_peer_addrs = [{raft_peers}]
+leader_id = 1
+join_max_retries = 90
+join_retry_secs = 1
+"#,
+            mqtt[i],
+            ws[i],
+            api[i],
+            i + 1,
+            grpc[i],
+            raft[i],
+        );
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, cfg).unwrap();
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_ciqadamq"))
+            .arg(&cfg_path)
+            .env("RUST_LOG_STYLE", "never")
+            .env("NO_COLOR", "1")
+            .spawn()
+            .unwrap();
+        brokers.push(Broker { child, tcp_port: mqtt[i], ws_port: ws[i], api_port: api[i] });
+    }
+
+    // Every node only opens its MQTT listener AFTER cluster registration succeeds, so all three
+    // serving means the cold cluster elected a leader. With leader_id=0 none would bootstrap.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    for b in &brokers {
+        loop {
+            if tokio::net::TcpStream::connect(("127.0.0.1", b.tcp_port)).await.is_ok() {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("cluster did not cold-bootstrap (a node never served MQTT) within 120s");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    brokers
+}
+
+#[tokio::test]
+async fn cluster_cold_bootstrap_serves() {
+    let nodes = start_cluster().await;
+    let http = reqwest::Client::new();
+    create_user(&http, nodes[0].api_port, "tok-cl", "u1200", "pw-cl", false, false).await;
+    create_user(&http, nodes[0].api_port, "clbackend", "svc", "pw-clb", true, false).await;
+
+    let mut dev = connect(nodes[0].tcp_port, "cldev", "tok-cl", "pw-cl").await;
+    let pubr = connect(nodes[0].tcp_port, "clpub", "clbackend", "pw-clb").await;
+    dev.subscribe_expect("chat/u1200/m/all", true).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    pubr.client
+        .publish("chat/u1200/m/all", QoS::AtLeastOnce, false, "cluster-ok")
+        .await
+        .unwrap();
+    let (topic, payload) = dev.recv().await;
+    assert_eq!(topic, "chat/u1200/m/all");
+    assert_eq!(payload, b"cluster-ok");
+}
+
+#[tokio::test]
+async fn qos2_exactly_once() {
+    let broker = start_broker(1200, false).await;
+    let http = reqwest::Client::new();
+    create_user(&http, broker.api_port, "tok-q2", "u5000", "pw-q2", false, false).await;
+    create_user(&http, broker.api_port, "q2pub", "svc", "pw-p", true, false).await;
+
+    let mut dev = connect(broker.tcp_port, "q2dev", "tok-q2", "pw-q2").await;
+    let pubr = connect(broker.tcp_port, "q2pub1", "q2pub", "pw-p").await;
+    dev.subscribe_expect("chat/u5000/m/all", true).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    pubr.client
+        .publish("chat/u5000/m/all", QoS::ExactlyOnce, false, "q2-msg")
+        .await
+        .unwrap();
+    let (topic, payload) = dev.recv().await;
+    assert_eq!(topic, "chat/u5000/m/all");
+    assert_eq!(payload, b"q2-msg");
+    dev.expect_silence().await;
+}
+
+#[tokio::test]
+async fn tcp_burst_no_loss() {
+    let broker = start_broker(1200, false).await;
+    let http = reqwest::Client::new();
+    create_user(&http, broker.api_port, "tok-burst", "u6000", "pw-b", false, false).await;
+    create_user(&http, broker.api_port, "burstpub", "svc", "pw-p", true, false).await;
+
+    let mut dev = connect(broker.tcp_port, "burstdev", "tok-burst", "pw-b").await;
+    let pubr = connect(broker.tcp_port, "burstpub1", "burstpub", "pw-p").await;
+    dev.subscribe_expect("chat/u6000/m/all", true).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    const N: usize = 200;
+    for i in 0..N {
+        pubr.client
+            .publish("chat/u6000/m/all", QoS::AtLeastOnce, false, format!("m-{i}"))
+            .await
+            .unwrap();
+    }
+    let msgs = dev.recv_n(N).await;
+    for (i, (topic, payload)) in msgs.into_iter().enumerate() {
+        assert_eq!(topic, "chat/u6000/m/all");
+        assert_eq!(payload, format!("m-{i}").into_bytes(), "tcp burst message {i} lost or reordered");
+    }
+    dev.expect_silence().await;
+}
+
+#[tokio::test]
+async fn websocket_burst_no_loss() {
+    let broker = start_broker(1200, false).await;
+    let http = reqwest::Client::new();
+    create_user(&http, broker.api_port, "tok-wsb", "u7000", "pw-wsb", false, false).await;
+    create_user(&http, broker.api_port, "wsbpub", "svc", "pw-p", true, false).await;
+
+    let mut ws_dev = connect_ws(broker.ws_port, "wsbdev", "tok-wsb", "pw-wsb").await;
+    let pubr = connect(broker.tcp_port, "wsbpub1", "wsbpub", "pw-p").await;
+    ws_dev.subscribe_expect("update/u7000/w/all", true).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    const N: usize = 200;
+    for i in 0..N {
+        pubr.client
+            .publish("update/u7000/w/all", QoS::AtLeastOnce, false, format!("w-{i}"))
+            .await
+            .unwrap();
+    }
+    let msgs = ws_dev.recv_n(N).await;
+    for (i, (topic, payload)) in msgs.into_iter().enumerate() {
+        assert_eq!(topic, "update/u7000/w/all");
+        assert_eq!(payload, format!("w-{i}").into_bytes(), "ws burst message {i} lost or reordered");
+    }
+    ws_dev.expect_silence().await;
+}
+
+#[tokio::test]
+async fn auth_repeated_connect_and_wrong_password() {
+    let broker = start_broker(1200, false).await;
+    let http = reqwest::Client::new();
+    create_user(&http, broker.api_port, "tok-ac", "u9000", "pw-ac", false, false).await;
+
+    for i in 0..5 {
+        let dev = connect(broker.tcp_port, &format!("acdev{i}"), "tok-ac", "pw-ac").await;
+        dev.client.disconnect().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    expect_rejected(broker.tcp_port, "acbad", "tok-ac", "wrong-pw").await;
+    let _ok = connect(broker.tcp_port, "acgood", "tok-ac", "pw-ac").await;
+}
+
+#[tokio::test]
+async fn management_password_validation() {
+    let broker = start_broker(1200, false).await;
+    let http = reqwest::Client::new();
+    let users_url = format!("http://127.0.0.1:{}/api/v1/users", broker.api_port);
+
+    let resp = http
+        .post(&users_url)
+        .bearer_auth("wrong-token")
+        .json(&json!({"username": "x", "userid": "u1", "password": "pw"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "wrong token must be rejected");
+
+    let resp = http
+        .post(&users_url)
+        .bearer_auth("test-token")
+        .json(&json!({"username": "emptypw", "userid": "u1", "password": ""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "empty password must be rejected");
+
+    let long = "p".repeat(513);
+    let resp = http
+        .post(&users_url)
+        .bearer_auth("test-token")
+        .json(&json!({"username": "longpw", "userid": "u1", "password": long}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "too-long password must be rejected");
 }

@@ -330,6 +330,6 @@ impl MessageManager for RedbMessageStore {
     }
 
     fn should_merge_on_get(&self) -> bool {
-        false
+        true
     }
 }

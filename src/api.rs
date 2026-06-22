@@ -1,4 +1,4 @@
-use crate::config::AclConfig;
+use crate::config::{AclConfig, ClusterConfig};
 use crate::db::{self, NewUser, UserRecord, UserStore};
 use async_trait::async_trait;
 use axum::extract::{Path, Request, State};
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -31,6 +31,8 @@ pub struct AppState {
     pub auth_sem: Arc<tokio::sync::Semaphore>,
     pub auth_disabled: bool,
     pub pepper: Option<Arc<[u8]>>,
+    pub cluster: Arc<ClusterConfig>,
+    pub scx: Arc<OnceLock<ServerContext>>,
 }
 
 pub struct AuthCache {
@@ -136,6 +138,7 @@ pub fn management_router(state: AppState) -> Router {
         .route("/api/v1/users/{username}", axum::routing::delete(delete_user))
         .route("/internal/replicate", post(replicate))
         .route("/internal/users-full", get(users_full))
+        .route("/api/v1/cluster", get(cluster_status))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token))
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
@@ -523,6 +526,25 @@ pub async fn catch_up(state: AppState) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     log::warn!("user snapshot catch-up: no peer responded yet");
+}
+
+async fn cluster_status(State(state): State<AppState>) -> Response {
+    let cfg = &state.cluster;
+    let mut body = json!({
+        "node_id": cfg.node_id,
+        "enabled": cfg.enabled,
+        "leader_id": cfg.leader_id,
+        "node_grpc_addrs": cfg.node_grpc_addrs,
+        "raft_peer_addrs": cfg.raft_peer_addrs,
+    });
+    match state.scx.get() {
+        Some(scx) => match scx.extends.shared().await.check_health().await {
+            Ok(health) => body["health"] = health.to_json(),
+            Err(e) => body["health_error"] = json!(e.to_string()),
+        },
+        None => body["health"] = json!("broker initializing"),
+    }
+    Json(body).into_response()
 }
 
 fn bad_request(msg: &str) -> Response {
