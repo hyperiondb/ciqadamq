@@ -162,7 +162,20 @@ impl ClusterPlugin {
                 log::info!("Specify a leader: {leader_info:?}");
                 if id == leader_info.id {
                     //First, check if the Leader exists.
-                    let actual_leader_info = find_actual_leader(&raft, peer_addrs, 30).await?;
+                    let mut actual_leader_info = find_actual_leader(&raft, peer_addrs.clone(), 30).await?;
+                    let max_rounds = if actual_leader_info.is_some() { 120 } else { 10 };
+                    let mut rounds = 0;
+                    while !matches!(&actual_leader_info, Some((lid, _)) if *lid != id) {
+                        if rounds >= max_rounds {
+                            log::warn!("startup: no other leader after {rounds} rounds; running in leader mode");
+                            actual_leader_info = None;
+                            break;
+                        }
+                        log::info!("startup: no external leader yet ({actual_leader_info:?}); waiting, never joining self");
+                        sleep(Duration::from_millis(500)).await;
+                        actual_leader_info = find_actual_leader(&raft, peer_addrs.clone(), 1).await?;
+                        rounds += 1;
+                    }
                     if actual_leader_info.is_some() {
                         log::info!("Leader already exists, {actual_leader_info:?}");
                     }
