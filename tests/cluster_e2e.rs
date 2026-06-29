@@ -1,4 +1,6 @@
-use rumqttc::{AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS, SubscribeReasonCode};
+use rumqttc::{
+    AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS, SubscribeReasonCode,
+};
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -9,7 +11,10 @@ fn nodes() -> Vec<(String, u16)> {
         .unwrap_or_else(|_| "127.0.0.1:1883,127.0.0.1:1884,127.0.0.1:1885".into())
         .split(',')
         .map(|s| {
-            let (h, p) = s.trim().rsplit_once(':').expect("node addr must be host:port");
+            let (h, p) = s
+                .trim()
+                .rsplit_once(':')
+                .expect("node addr must be host:port");
             (h.to_string(), p.parse().expect("invalid port"))
         })
         .collect()
@@ -17,7 +22,9 @@ fn nodes() -> Vec<(String, u16)> {
 
 fn api_bases() -> Vec<String> {
     std::env::var("CLUSTER_APIS")
-        .unwrap_or_else(|_| "http://127.0.0.1:8090,http://127.0.0.1:8091,http://127.0.0.1:8092".into())
+        .unwrap_or_else(|_| {
+            "http://127.0.0.1:8090,http://127.0.0.1:8091,http://127.0.0.1:8092".into()
+        })
         .split(',')
         .map(|s| s.trim().to_string())
         .collect()
@@ -28,7 +35,10 @@ fn token() -> String {
 }
 
 fn unique(prefix: &str) -> String {
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     format!("{prefix}{n}")
 }
 
@@ -79,10 +89,19 @@ async fn try_connect(
             }
         }
     });
-    Ok(TestClient { client, msgs: rx, subacks: rx_sub })
+    Ok(TestClient {
+        client,
+        msgs: rx,
+        subacks: rx_sub,
+    })
 }
 
-async fn connect(node: &(String, u16), client_id: &str, username: &str, password: &str) -> TestClient {
+async fn connect(
+    node: &(String, u16),
+    client_id: &str,
+    username: &str,
+    password: &str,
+) -> TestClient {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match try_connect(node, client_id, username, password).await {
@@ -99,7 +118,10 @@ async fn connect(node: &(String, u16), client_id: &str, username: &str, password
 
 impl TestClient {
     async fn subscribe_expect(&mut self, topic: &str, expect_ok: bool) {
-        self.client.subscribe(topic, QoS::AtLeastOnce).await.unwrap();
+        self.client
+            .subscribe(topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
         let codes = timeout(Duration::from_secs(10), self.subacks.recv())
             .await
             .expect("timed out waiting for suback")
@@ -138,7 +160,11 @@ async fn expect_rejected(node: &(String, u16), client_id: &str, username: &str, 
     .await
     .expect("timed out waiting for auth rejection");
     match outcome {
-        Ok(code) => assert_ne!(code, ConnectReturnCode::Success, "{client_id} unexpectedly accepted"),
+        Ok(code) => assert_ne!(
+            code,
+            ConnectReturnCode::Success,
+            "{client_id} unexpectedly accepted"
+        ),
         Err(rumqttc::ConnectionError::ConnectionRefused(code)) => {
             assert_ne!(code, ConnectReturnCode::Success)
         }
@@ -194,7 +220,12 @@ async fn cluster_cross_node() {
 
     publisher
         .client
-        .publish(chat_topic.as_str(), QoS::AtLeastOnce, false, "cross-node-chat")
+        .publish(
+            chat_topic.as_str(),
+            QoS::AtLeastOnce,
+            false,
+            "cross-node-chat",
+        )
         .await
         .unwrap();
     let (topic_a, payload_a) = dev_a.recv().await;

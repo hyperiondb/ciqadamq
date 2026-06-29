@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod fanout;
 mod msgstore;
+mod vault;
 
 use anyhow::Result;
 use api::AppState;
@@ -12,7 +13,7 @@ use fanout::UseridAutoSubscription;
 use rmqtt::context::ServerContext;
 use rmqtt::net::Builder;
 use rmqtt::server::MqttServer;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 #[global_allocator]
@@ -21,10 +22,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let cfg_path = std::env::args().nth(1).unwrap_or_else(|| "config.toml".into());
+    let cfg_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config.toml".into());
     let cfg = Config::load(&cfg_path)?;
 
-    let token = cfg.api.token.clone().unwrap_or_else(|| {
+    let mut token = cfg.api.token.clone().unwrap_or_else(|| {
         let t = random_token();
         log::warn!("api.token not set, generated token for this run: {t}");
         t
@@ -68,7 +71,11 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|n| *n > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        });
     let auth_disabled = std::env::var("AUTH_DISABLED")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -77,24 +84,58 @@ async fn main() -> Result<()> {
             "AUTH_DISABLED set: MQTT auth and ACL are bypassed, all clients allowed as superuser (testing only)"
         );
     }
-    let pepper: Option<Arc<[u8]>> = std::env::var("AUTH_PEPPER")
+    let mut pepper: Option<Arc<[u8]>> = std::env::var("AUTH_PEPPER")
         .ok()
         .filter(|s| !s.is_empty())
         .map(|s| Arc::from(s.into_bytes()));
-    if pepper.is_some() {
-        log::info!("AUTH_PEPPER set: fast password verifier enabled (argon2 used on first auth and as fallback)");
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+    let vault = vault::VaultClient::from_env(http.clone());
+    if let Some(vault) = &vault {
+        match vault.get_value("ciqada/api-token").await {
+            Ok(Some(v)) => {
+                token = v;
+                log::info!("api token loaded from vault");
+            }
+            Ok(None) => {
+                log::warn!("vault secret 'ciqada/api-token' not found; using env/config api token")
+            }
+            Err(e) => log::warn!("vault api-token fetch failed ({e}); using env/config api token"),
+        }
+        match vault.get_value("ciqada/pepper").await {
+            Ok(Some(v)) => {
+                pepper = Some(Arc::from(v.into_bytes()));
+                log::info!("auth pepper loaded from vault");
+            }
+            Ok(None) => {
+                log::warn!("vault secret 'ciqada/pepper' not found; using env pepper if set")
+            }
+            Err(e) => log::warn!("vault pepper fetch failed ({e}); using env pepper if set"),
+        }
     }
+    if pepper.is_some() {
+        log::info!("fast password verifier enabled (argon2 used on first auth and as fallback)");
+    }
+
     let state = AppState {
         db: db.clone(),
-        token: Arc::new(token),
+        token: Arc::new(RwLock::new(api::TokenPair {
+            current: token,
+            previous: None,
+            refreshed_at: None,
+        })),
         acl: Arc::new(cfg.acl.clone()),
         auth_cache,
         users: user_cache,
         peers: Arc::new(peers),
-        http: reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap_or_default(),
+        http: http.clone(),
         auth_sem: Arc::new(tokio::sync::Semaphore::new(hash_concurrency)),
         auth_disabled,
         pepper,
+        vault,
         cluster: Arc::new(cfg.cluster.clone()),
         scx: Arc::new(std::sync::OnceLock::new()),
     };
@@ -118,8 +159,10 @@ async fn main() -> Result<()> {
         .node_id(cfg.cluster.node_id)
         .busy_check_enable(cfg.mqtt.busy_check);
     if cfg.cluster.enabled {
-        scx_builder = scx_builder
-            .plugins_config_map_add("rmqtt-cluster-raft", cluster_raft_plugin_config(&cfg.cluster));
+        scx_builder = scx_builder.plugins_config_map_add(
+            "rmqtt-cluster-raft",
+            cluster_raft_plugin_config(&cfg.cluster),
+        );
     }
     let scx = scx_builder.build().await;
     let _ = state.scx.set(scx.clone());
@@ -133,7 +176,8 @@ async fn main() -> Result<()> {
             cfg.cluster.grpc_laddr,
             cfg.cluster.raft_laddr
         );
-        scx.node.start_grpc_server(scx.clone(), cfg.cluster.grpc_laddr, true, false);
+        scx.node
+            .start_grpc_server(scx.clone(), cfg.cluster.grpc_laddr, true, false);
         let mut attempt: u32 = 0;
         loop {
             match rmqtt_cluster_raft::register(&scx, true, true).await {
@@ -154,8 +198,11 @@ async fn main() -> Result<()> {
     }
 
     if cfg.fanout.auto_subscribe {
-        *scx.extends.auto_subscription_mut().await =
-            Box::new(UseridAutoSubscription::new(db.clone(), &cfg.fanout, &cfg.acl));
+        *scx.extends.auto_subscription_mut().await = Box::new(UseridAutoSubscription::new(
+            db.clone(),
+            &cfg.fanout,
+            &cfg.acl,
+        ));
     }
 
     let mut shutdown_flush: Option<msgstore::RedbMessageStore> = None;
@@ -183,7 +230,9 @@ async fn main() -> Result<()> {
                         });
                         log::info!("message persistence enabled (redb, flush every {flush_secs}s)");
                     } else {
-                        log::info!("message store in-memory only (MSG_FLUSH_SECS=0, no disk flush)");
+                        log::info!(
+                            "message store in-memory only (MSG_FLUSH_SECS=0, no disk flush)"
+                        );
                     }
                     *scx.extends.message_mgr_mut().await = Box::new(store);
                 }
@@ -202,8 +251,13 @@ async fn main() -> Result<()> {
         expiry.as_secs()
     );
 
-    if let Some(secs) = std::env::var("PROFILE_SECS").ok().and_then(|s| s.parse::<u64>().ok()) {
-        log::info!("PROFILE_SECS={secs}: broker will exit cleanly after {secs}s so the profiler can write its output");
+    if let Some(secs) = std::env::var("PROFILE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        log::info!(
+            "PROFILE_SECS={secs}: broker will exit cleanly after {secs}s so the profiler can write its output"
+        );
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(secs)).await;
             std::process::exit(0);
@@ -219,7 +273,10 @@ async fn main() -> Result<()> {
                 .nodelay(true)
                 .message_expiry_interval(expiry)
                 .max_mqueue_len(cfg.mqtt.max_mqueue_len)
-                .max_inflight(std::num::NonZeroU16::new(cfg.mqtt.max_inflight).unwrap_or(std::num::NonZeroU16::MAX))
+                .max_inflight(
+                    std::num::NonZeroU16::new(cfg.mqtt.max_inflight)
+                        .unwrap_or(std::num::NonZeroU16::MAX),
+                )
                 .bind()?
                 .tcp()?,
         )
@@ -231,7 +288,10 @@ async fn main() -> Result<()> {
                 .nodelay(true)
                 .message_expiry_interval(expiry)
                 .max_mqueue_len(cfg.mqtt.max_mqueue_len)
-                .max_inflight(std::num::NonZeroU16::new(cfg.mqtt.max_inflight).unwrap_or(std::num::NonZeroU16::MAX))
+                .max_inflight(
+                    std::num::NonZeroU16::new(cfg.mqtt.max_inflight)
+                        .unwrap_or(std::num::NonZeroU16::MAX),
+                )
                 .bind()?
                 .ws()?,
         )
@@ -253,7 +313,7 @@ async fn main() -> Result<()> {
 
 #[cfg(unix)]
 async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
     let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
     tokio::select! {

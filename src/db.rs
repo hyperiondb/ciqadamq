@@ -1,12 +1,12 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -48,11 +48,17 @@ pub async fn open(url: &str) -> Result<Arc<dyn UserStore>> {
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 pub fn redb_cache_bytes() -> usize {
-    std::env::var("REDB_CACHE_BYTES").ok().and_then(|s| s.parse().ok()).unwrap_or(64 * 1024 * 1024)
+    std::env::var("REDB_CACHE_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64 * 1024 * 1024)
 }
 
 pub fn hash_password(password: &str) -> Result<String> {
@@ -73,7 +79,11 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 pub fn verify_password(stored_hash: &str, password: &str) -> bool {
     PasswordHash::new(stored_hash)
-        .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+        .map(|parsed| {
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -108,7 +118,8 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>> {
-    bincode::serde::encode_to_vec(v, bincode::config::standard()).map_err(|e| anyhow!("bincode encode: {e}"))
+    bincode::serde::encode_to_vec(v, bincode::config::standard())
+        .map_err(|e| anyhow!("bincode encode: {e}"))
 }
 
 fn dec<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
@@ -254,8 +265,7 @@ impl UserStore for RedbStore {
             let mut out = Vec::new();
             for item in t.iter()? {
                 let (_, v) = item?;
-                let rec: UserRecord =
-                    dec(v.value())?;
+                let rec: UserRecord = dec(v.value())?;
                 out.push(rec);
             }
             out.sort_by(|a, b| a.username.cmp(&b.username));
@@ -270,9 +280,7 @@ impl UserStore for RedbStore {
             let rtx = db.begin_read()?;
             let t = rtx.open_table(USERS_TABLE)?;
             match t.get(username.as_str())? {
-                Some(v) => Ok(Some(
-                    dec(v.value())?,
-                )),
+                Some(v) => Ok(Some(dec(v.value())?)),
                 None => Ok(None),
             }
         })

@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rumqttc::{AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::timeout;
 
 #[derive(Clone)]
@@ -44,13 +44,20 @@ fn load_settings() -> Result<Settings> {
     let nodes = env_or("PERF_NODES", "127.0.0.1:1883,127.0.0.1:1884,127.0.0.1:1885")
         .split(',')
         .map(|s| {
-            let (h, p) = s.trim().rsplit_once(':').ok_or_else(|| anyhow!("bad node addr: {s}"))?;
+            let (h, p) = s
+                .trim()
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow!("bad node addr: {s}"))?;
             Ok((h.to_string(), p.parse::<u16>()?))
         })
         .collect::<Result<Vec<_>>>()?;
     let sub_counts = env_or("PERF_SUBS", "100,500,1000,2500,5000,10000")
         .split(',')
-        .map(|s| s.trim().parse::<usize>().context("PERF_SUBS must be integers"))
+        .map(|s| {
+            s.trim()
+                .parse::<usize>()
+                .context("PERF_SUBS must be integers")
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(Settings {
         nodes,
@@ -68,7 +75,10 @@ fn load_settings() -> Result<Settings> {
 }
 
 fn now_nanos() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 async fn create_user(
@@ -128,7 +138,9 @@ async fn connect_subscriber(
                 }
                 tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
             }
-            Err(e) => return Err(e.context(format!("{client_id} gave up after {max_attempts} attempts"))),
+            Err(e) => {
+                return Err(e.context(format!("{client_id} gave up after {max_attempts} attempts")));
+            }
         }
     }
     unreachable!()
@@ -174,7 +186,10 @@ async fn finish_subscriber(
         loop {
             match eventloop.poll().await {
                 Ok(Event::Incoming(Packet::SubAck(ack))) => {
-                    if matches!(ack.return_codes.first(), Some(rumqttc::SubscribeReasonCode::Success(_))) {
+                    if matches!(
+                        ack.return_codes.first(),
+                        Some(rumqttc::SubscribeReasonCode::Success(_))
+                    ) {
                         return Ok(());
                     }
                     return Err(anyhow!("{client_id} subscribe denied"));
@@ -247,7 +262,11 @@ async fn run_round(s: &Settings, run_id: &str, subscribers: usize) -> Result<Rou
     let mut publishers = Vec::with_capacity(num_pubs);
     for p in 0..num_pubs {
         let node = &s.nodes[p % s.nodes.len()];
-        let mut opts = MqttOptions::new(format!("perf-pub-{run_id}-{subscribers}-{p}"), &node.0, node.1);
+        let mut opts = MqttOptions::new(
+            format!("perf-pub-{run_id}-{subscribers}-{p}"),
+            &node.0,
+            node.1,
+        );
         opts.set_credentials(format!("tok-pub-{run_id}"), "perf-pass");
         opts.set_keep_alive(Duration::from_secs(30));
         opts.set_inflight(s.inflight);
@@ -293,7 +312,11 @@ async fn run_round(s: &Settings, run_id: &str, subscribers: usize) -> Result<Rou
             for seq in begin..end {
                 let topic = format!("chat/{}/m/all", userids[(seq as usize) % users]);
                 let payload = format!("{}|{}", now_nanos(), padding);
-                if client.publish(topic, QoS::AtLeastOnce, false, payload).await.is_err() {
+                if client
+                    .publish(topic, QoS::AtLeastOnce, false, payload)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -378,7 +401,14 @@ async fn main() -> Result<()> {
         let sem = sem.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            create_user(&http, &s, &format!("tok-{run_id}-{i}"), &format!("uid-{run_id}-{i}"), false).await
+            create_user(
+                &http,
+                &s,
+                &format!("tok-{run_id}-{i}"),
+                &format!("uid-{run_id}-{i}"),
+                false,
+            )
+            .await
         }));
     }
     for h in handles {
@@ -392,7 +422,13 @@ async fn main() -> Result<()> {
         let r = run_round(&s, &run_id, n).await?;
         println!(
             "  delivered {}/{} in {:.2}s -> {:.0} msg/s, p50 {:.1}ms p95 {:.1}ms p99 {:.1}ms",
-            r.delivered, r.expected, r.duration_secs, r.delivered_per_sec, r.p50_ms, r.p95_ms, r.p99_ms
+            r.delivered,
+            r.expected,
+            r.duration_secs,
+            r.delivered_per_sec,
+            r.p50_ms,
+            r.p95_ms,
+            r.p99_ms
         );
         results.push(r);
     }
@@ -416,12 +452,22 @@ async fn main() -> Result<()> {
     }
 
     let csv_path = s.out.replace(".svg", ".csv");
-    let mut csv = String::from("subscribers,users,published,expected,delivered,duration_secs,delivered_per_sec,p50_ms,p95_ms,p99_ms\n");
+    let mut csv = String::from(
+        "subscribers,users,published,expected,delivered,duration_secs,delivered_per_sec,p50_ms,p95_ms,p99_ms\n",
+    );
     for r in &results {
         csv.push_str(&format!(
             "{},{},{},{},{},{:.3},{:.1},{:.2},{:.2},{:.2}\n",
-            r.subscribers, r.users, r.published, r.expected, r.delivered, r.duration_secs,
-            r.delivered_per_sec, r.p50_ms, r.p95_ms, r.p99_ms
+            r.subscribers,
+            r.users,
+            r.published,
+            r.expected,
+            r.delivered,
+            r.duration_secs,
+            r.delivered_per_sec,
+            r.p50_ms,
+            r.p95_ms,
+            r.p99_ms
         ));
     }
     std::fs::write(&csv_path, csv)?;
@@ -454,7 +500,11 @@ fn render_svg(results: &[RoundResult]) -> String {
     let panels: [(&str, Vec<(&str, &str, Vec<f64>)>); 2] = [
         (
             "messages delivered to end users / second",
-            vec![("msg/s", "#1f77b4", results.iter().map(|r| r.delivered_per_sec).collect())],
+            vec![(
+                "msg/s",
+                "#1f77b4",
+                results.iter().map(|r| r.delivered_per_sec).collect(),
+            )],
         ),
         (
             "end-to-end delivery latency (ms)",
@@ -485,7 +535,9 @@ fn render_svg(results: &[RoundResult]) -> String {
             r#"<line x1="{ml}" y1="{bottom}" x2="{}" y2="{bottom}" stroke="black"/>"#,
             ml + plot_w
         ));
-        svg.push_str(&format!(r#"<line x1="{ml}" y1="{top}" x2="{ml}" y2="{bottom}" stroke="black"/>"#));
+        svg.push_str(&format!(
+            r#"<line x1="{ml}" y1="{top}" x2="{ml}" y2="{bottom}" stroke="black"/>"#
+        ));
 
         for t in 0..=5 {
             let yv = y_max / 5.0 * t as f64;
@@ -516,8 +568,11 @@ fn render_svg(results: &[RoundResult]) -> String {
         ));
 
         for (si, (label, color, vals)) in series.iter().enumerate() {
-            let points: Vec<String> =
-                xs.iter().zip(vals.iter()).map(|(x, v)| format!("{:.1},{:.1}", x_pos(*x), y_pos(*v))).collect();
+            let points: Vec<String> = xs
+                .iter()
+                .zip(vals.iter())
+                .map(|(x, v)| format!("{:.1},{:.1}", x_pos(*x), y_pos(*v)))
+                .collect();
             svg.push_str(&format!(
                 r#"<polyline points="{}" fill="none" stroke="{color}" stroke-width="2"/>"#,
                 points.join(" ")
@@ -531,8 +586,14 @@ fn render_svg(results: &[RoundResult]) -> String {
             }
             let lx = ml + plot_w - 90.0;
             let ly = top + 16.0 + si as f64 * 18.0;
-            svg.push_str(&format!(r#"<rect x="{lx}" y="{}" width="12" height="12" fill="{color}"/>"#, ly - 10.0));
-            svg.push_str(&format!(r#"<text x="{}" y="{ly}">{label}</text>"#, lx + 18.0));
+            svg.push_str(&format!(
+                r#"<rect x="{lx}" y="{}" width="12" height="12" fill="{color}"/>"#,
+                ly - 10.0
+            ));
+            svg.push_str(&format!(
+                r#"<text x="{}" y="{ly}">{label}</text>"#,
+                lx + 18.0
+            ));
         }
     }
     svg.push_str("</svg>");

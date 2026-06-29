@@ -1,9 +1,11 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
-use rmqtt::message::MessageManager;
-use rmqtt::types::{ClientId, From as MsgFrom, MsgID, Publish, SharedGroup, TopicFilter, TopicName};
 use rmqtt::Result as RmqttResult;
+use rmqtt::message::MessageManager;
+use rmqtt::types::{
+    ClientId, From as MsgFrom, MsgID, Publish, SharedGroup, TopicFilter, TopicName,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -15,7 +17,8 @@ const COUNTER_MASK: u64 = 0xFFFF_FFFF_FFFF;
 const MESSAGES: TableDefinition<u64, &[u8]> = TableDefinition::new("messages");
 
 fn enc<T: Serialize>(v: &T) -> Result<Vec<u8>> {
-    bincode::serde::encode_to_vec(v, bincode::config::standard()).map_err(|e| anyhow!("bincode encode: {e}"))
+    bincode::serde::encode_to_vec(v, bincode::config::standard())
+        .map_err(|e| anyhow!("bincode encode: {e}"))
 }
 
 fn dec<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
@@ -50,7 +53,11 @@ impl MemState {
         while let Some(&id) = self.order.front() {
             let over_cap = (max_msgs > 0 && self.msgs.len() > max_msgs)
                 || (max_bytes > 0 && self.bytes > max_bytes);
-            let expired = self.msgs.get(&id).map(|m| m.expiry_at <= now).unwrap_or(true);
+            let expired = self
+                .msgs
+                .get(&id)
+                .map(|m| m.expiry_at <= now)
+                .unwrap_or(true);
             if !over_cap && !expired {
                 break;
             }
@@ -126,15 +133,23 @@ impl RedbMessageStore {
         let bytes: usize = msgs.values().map(approx_size).sum();
         let mut by_topic: HashMap<TopicName, HashSet<u64>> = HashMap::new();
         for (id, m) in &msgs {
-            by_topic.entry(m.publish.topic.clone()).or_default().insert(*id);
+            by_topic
+                .entry(m.publish.topic.clone())
+                .or_default()
+                .insert(*id);
         }
 
-        let max_msgs = std::env::var("MSG_MAX_MSGS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let max_msgs = std::env::var("MSG_MAX_MSGS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
         let max_bytes = std::env::var("MSG_MAX_BYTES")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(256 * 1024 * 1024);
-        log::info!("message store memory cap: max_msgs={max_msgs} max_bytes={max_bytes} (0 = unbounded)");
+        log::info!(
+            "message store memory cap: max_msgs={max_msgs} max_bytes={max_bytes} (0 = unbounded)"
+        );
 
         let state = Arc::new(Mutex::new(MemState {
             msgs,
@@ -156,7 +171,10 @@ impl RedbMessageStore {
                         st.removed.remove(&key);
                         match st.msgs.insert(key, msg) {
                             Some(old) => {
-                                st.bytes = st.bytes.saturating_sub(approx_size(&old)).saturating_add(size);
+                                st.bytes = st
+                                    .bytes
+                                    .saturating_sub(approx_size(&old))
+                                    .saturating_add(size);
                             }
                             None => {
                                 st.order.push_back(key);
@@ -228,7 +246,10 @@ impl RedbMessageStore {
 }
 
 fn now_millis() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn topic_matches(topic: &str, filter: &str) -> bool {
@@ -276,7 +297,12 @@ impl MessageManager for RedbMessageStore {
             .map(|(cid, _)| cid.to_string())
             .collect();
         let key = msg_id as u64;
-        let msg = StoredMsg { from, publish: p, expiry_at, delivered_to };
+        let msg = StoredMsg {
+            from,
+            publish: p,
+            expiry_at,
+            delivered_to,
+        };
         let _ = self.tx.send((key, msg));
         Ok(())
     }
@@ -300,7 +326,10 @@ impl MessageManager for RedbMessageStore {
                     .collect()
             } else {
                 let key = TopicName::from(topic_filter.to_owned());
-                st.by_topic.get(&key).map(|ids| ids.iter().copied().collect()).unwrap_or_default()
+                st.by_topic
+                    .get(&key)
+                    .map(|ids| ids.iter().copied().collect())
+                    .unwrap_or_default()
             };
             let mut touched = Vec::new();
             for id in candidates {

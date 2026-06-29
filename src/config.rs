@@ -123,13 +123,18 @@ impl Default for ApiConfig {
 
 impl Default for DbConfig {
     fn default() -> Self {
-        Self { url: "redb://data/users.redb".into() }
+        Self {
+            url: "redb://data/users.redb".into(),
+        }
     }
 }
 
 impl Default for FanoutConfig {
     fn default() -> Self {
-        Self { auto_subscribe: false, qos: 1 }
+        Self {
+            auto_subscribe: false,
+            qos: 1,
+        }
     }
 }
 
@@ -147,8 +152,7 @@ impl Default for AclConfig {
 impl Config {
     pub fn load(path: &str) -> Result<Self> {
         let mut cfg: Config = if Path::new(path).exists() {
-            let raw = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {path}"))?;
+            let raw = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
             toml::from_str(&raw).with_context(|| format!("parsing {path}"))?
         } else {
             log::warn!("config file {path} not found, using defaults");

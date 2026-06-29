@@ -2,7 +2,7 @@ use crate::config::{AclConfig, ClusterConfig};
 use crate::db::{self, NewUser, UserRecord, UserStore};
 use async_trait::async_trait;
 use axum::extract::{Path, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<dyn UserStore>,
-    pub token: Arc<String>,
+    pub token: Arc<RwLock<TokenPair>>,
     pub acl: Arc<AclConfig>,
     pub auth_cache: Arc<AuthCache>,
     pub users: Arc<UserCache>,
@@ -31,8 +31,47 @@ pub struct AppState {
     pub auth_sem: Arc<tokio::sync::Semaphore>,
     pub auth_disabled: bool,
     pub pepper: Option<Arc<[u8]>>,
+    pub vault: Option<crate::vault::VaultClient>,
     pub cluster: Arc<ClusterConfig>,
     pub scx: Arc<OnceLock<ServerContext>>,
+}
+
+#[derive(Clone, Default)]
+pub struct TokenPair {
+    pub current: String,
+    pub previous: Option<String>,
+    pub refreshed_at: Option<Instant>,
+}
+
+impl AppState {
+    pub fn token_matches(&self, presented: &str) -> bool {
+        let guard = self.token.read().unwrap();
+        presented == guard.current || guard.previous.as_deref() == Some(presented)
+    }
+
+    pub fn current_token(&self) -> String {
+        self.token.read().unwrap().current.clone()
+    }
+
+    pub async fn refresh_token(&self) {
+        let Some(vault) = &self.vault else {
+            return;
+        };
+        {
+            let mut guard = self.token.write().unwrap();
+            match guard.refreshed_at {
+                Some(at) if at.elapsed() < Duration::from_secs(5) => return,
+                _ => guard.refreshed_at = Some(Instant::now()),
+            }
+        }
+        if let Ok(Some(new)) = vault.get_value("ciqada/api-token").await {
+            let mut guard = self.token.write().unwrap();
+            if guard.current != new {
+                log::info!("ciqada api token refreshed from vault");
+                guard.previous = Some(std::mem::replace(&mut guard.current, new));
+            }
+        }
+    }
 }
 
 pub struct AuthCache {
@@ -42,7 +81,10 @@ pub struct AuthCache {
 
 impl AuthCache {
     pub fn new(ttl: Duration) -> Self {
-        Self { map: RwLock::new(HashMap::new()), ttl }
+        Self {
+            map: RwLock::new(HashMap::new()),
+            ttl,
+        }
     }
 
     fn get(&self, key: &[u8; 32]) -> Option<bool> {
@@ -85,7 +127,10 @@ pub struct UserCache {
 
 impl UserCache {
     pub fn new(ttl: Duration) -> Self {
-        Self { map: RwLock::new(HashMap::new()), ttl }
+        Self {
+            map: RwLock::new(HashMap::new()),
+            ttl,
+        }
     }
 
     fn get(&self, username: &str) -> Option<UserRecord> {
@@ -135,7 +180,10 @@ struct CreateUser {
 pub fn management_router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/users", get(list_users).post(create_user))
-        .route("/api/v1/users/{username}", axum::routing::delete(delete_user))
+        .route(
+            "/api/v1/users/{username}",
+            axum::routing::delete(delete_user),
+        )
         .route("/internal/replicate", post(replicate))
         .route("/internal/users-full", get(users_full))
         .route("/api/v1/cluster", get(cluster_status))
@@ -145,22 +193,36 @@ pub fn management_router(state: AppState) -> Router {
 }
 
 async fn require_token(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let authorized = req
+    let presented = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t == state.token.as_str())
-        .unwrap_or(false);
+        .map(|t| t.to_string());
+    let authorized = match &presented {
+        Some(token) if state.token_matches(token) => true,
+        Some(token) => {
+            state.refresh_token().await;
+            state.token_matches(token)
+        }
+        None => false,
+    };
     if authorized {
         next.run(req).await
     } else {
-        (StatusCode::UNAUTHORIZED, Json(json!({"error": "invalid or missing bearer token"}))).into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid or missing bearer token"})),
+        )
+            .into_response()
     }
 }
 
 fn valid_segment(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn valid_username(s: &str) -> bool {
@@ -178,7 +240,10 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
         return bad_request("password must be 1-512 bytes");
     }
     let password = req.password;
-    let verifier = state.pepper.as_ref().map(|p| db::compute_verifier(p, &req.username, &password));
+    let verifier = state
+        .pepper
+        .as_ref()
+        .map(|p| db::compute_verifier(p, &req.username, &password));
     let _permit = state.auth_sem.clone().acquire_owned().await;
     let hash = match tokio::task::spawn_blocking(move || db::hash_password(&password)).await {
         Ok(Ok(h)) => h,
@@ -211,7 +276,11 @@ async fn create_user(State(state): State<AppState>, Json(req): Json<CreateUser>)
             )
                 .into_response()
         }
-        Ok(false) => (StatusCode::CONFLICT, Json(json!({"error": "user already exists"}))).into_response(),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "user already exists"})),
+        )
+            .into_response(),
         Err(e) => internal_error(e),
     }
 }
@@ -221,10 +290,20 @@ async fn delete_user(State(state): State<AppState>, Path(username): Path<String>
         Ok(true) => {
             state.auth_cache.purge_user(&username);
             state.users.purge(&username);
-            fanout(&state, &ReplOp::Delete { username: username.clone() }).await;
+            fanout(
+                &state,
+                &ReplOp::Delete {
+                    username: username.clone(),
+                },
+            )
+            .await;
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "user not found"}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "user not found"})),
+        )
+            .into_response(),
         Err(e) => internal_error(e),
     }
 }
@@ -275,9 +354,25 @@ async fn lookup_user(state: &AppState, username: &str) -> Result<Option<UserReco
 
 pub async fn register_auth_hooks(scx: &ServerContext, state: AppState) -> Box<dyn Register> {
     let register = scx.extends.hook_mgr().register();
-    register.add(Type::ClientAuthenticate, Box::new(MqttAuth { state: state.clone() })).await;
-    register.add(Type::ClientSubscribeCheckAcl, Box::new(MqttAuth { state: state.clone() })).await;
-    register.add(Type::MessagePublishCheckAcl, Box::new(MqttAuth { state })).await;
+    register
+        .add(
+            Type::ClientAuthenticate,
+            Box::new(MqttAuth {
+                state: state.clone(),
+            }),
+        )
+        .await;
+    register
+        .add(
+            Type::ClientSubscribeCheckAcl,
+            Box::new(MqttAuth {
+                state: state.clone(),
+            }),
+        )
+        .await;
+    register
+        .add(Type::MessagePublishCheckAcl, Box::new(MqttAuth { state }))
+        .await;
     register.start().await;
     register
 }
@@ -289,11 +384,15 @@ struct MqttAuth {
 impl MqttAuth {
     async fn authenticate(&self, connect_info: &ConnectInfo) -> ReturnType {
         if self.state.auth_disabled {
-            return (false, Some(HookResult::AuthResult(AuthResult::Allow(true, None))));
+            return (
+                false,
+                Some(HookResult::AuthResult(AuthResult::Allow(true, None))),
+            );
         }
         let username = connect_info.username().map(|u| u.to_string());
-        let password =
-            connect_info.password().and_then(|p| std::str::from_utf8(p).ok().map(|s| s.to_string()));
+        let password = connect_info
+            .password()
+            .and_then(|p| std::str::from_utf8(p).ok().map(|s| s.to_string()));
         let (Some(username), Some(password)) = (username, password) else {
             return deny_auth();
         };
@@ -303,7 +402,12 @@ impl MqttAuth {
         let record = match lookup_user(&self.state, &username).await {
             Ok(Some(r)) => r,
             Ok(None) => return deny_auth(),
-            Err(_) => return (false, Some(HookResult::AuthResult(AuthResult::NotAuthorized))),
+            Err(_) => {
+                return (
+                    false,
+                    Some(HookResult::AuthResult(AuthResult::NotAuthorized)),
+                );
+            }
         };
         let key = auth_key(&username, &password);
         let mut verified = self.state.auth_cache.get(&key).is_some();
@@ -321,7 +425,9 @@ impl MqttAuth {
             let _permit = self.state.auth_sem.clone().acquire_owned().await;
             let hash = record.password_hash.clone();
             let pw = password.clone();
-            if let Ok(true) = tokio::task::spawn_blocking(move || db::verify_password(&hash, &pw)).await {
+            if let Ok(true) =
+                tokio::task::spawn_blocking(move || db::verify_password(&hash, &pw)).await
+            {
                 self.state.auth_cache.insert(key, record.superuser);
                 if let Some(pepper) = &self.state.pepper {
                     let v = db::compute_verifier(pepper, &username, &password);
@@ -334,7 +440,13 @@ impl MqttAuth {
             return deny_auth();
         }
         let auth_info = build_auth_info(&record, &self.state.acl, connect_info);
-        (false, Some(HookResult::AuthResult(AuthResult::Allow(record.superuser, Some(auth_info)))))
+        (
+            false,
+            Some(HookResult::AuthResult(AuthResult::Allow(
+                record.superuser,
+                Some(auth_info),
+            ))),
+        )
     }
 }
 
@@ -347,10 +459,9 @@ impl Handler for MqttAuth {
                 if !self.state.acl.enabled {
                     return (
                         false,
-                        Some(HookResult::SubscribeAclResult(SubscribeAclResult::new_success(
-                            subscribe.opts.qos(),
-                            None,
-                        ))),
+                        Some(HookResult::SubscribeAclResult(
+                            SubscribeAclResult::new_success(subscribe.opts.qos(), None),
+                        )),
                     );
                 }
                 if let Some(auth_info) = &session.auth_info {
@@ -360,21 +471,29 @@ impl Handler for MqttAuth {
                 }
                 (
                     false,
-                    Some(HookResult::SubscribeAclResult(SubscribeAclResult::new_failure(
-                        SubscribeAckReason::NotAuthorized,
-                    ))),
+                    Some(HookResult::SubscribeAclResult(
+                        SubscribeAclResult::new_failure(SubscribeAckReason::NotAuthorized),
+                    )),
                 )
             }
             Parameter::MessagePublishCheckAcl(session, publish) => {
                 if !self.state.acl.enabled {
-                    return (false, Some(HookResult::PublishAclResult(PublishAclResult::allow())));
+                    return (
+                        false,
+                        Some(HookResult::PublishAclResult(PublishAclResult::allow())),
+                    );
                 }
                 if let Some(auth_info) = &session.auth_info {
                     if let Some(res) = auth_info.publish_acl(publish, true).await {
                         return res;
                     }
                 }
-                (false, Some(HookResult::PublishAclResult(PublishAclResult::rejected(true, None))))
+                (
+                    false,
+                    Some(HookResult::PublishAclResult(PublishAclResult::rejected(
+                        true, None,
+                    ))),
+                )
             }
             _ => (true, acc),
         }
@@ -382,12 +501,19 @@ impl Handler for MqttAuth {
 }
 
 fn deny_auth() -> ReturnType {
-    (false, Some(HookResult::AuthResult(AuthResult::BadUsernameOrPassword)))
+    (
+        false,
+        Some(HookResult::AuthResult(AuthResult::BadUsernameOrPassword)),
+    )
 }
 
 fn build_auth_info(record: &UserRecord, acl: &AclConfig, ci: &ConnectInfo) -> AuthInfo {
     if record.superuser {
-        return AuthInfo { superuser: true, expire_at: None, rules: Vec::new() };
+        return AuthInfo {
+            superuser: true,
+            expire_at: None,
+            rules: Vec::new(),
+        };
     }
     let mut filters: Vec<String> = vec![format!("+/{}/#", record.userid)];
     for p in &acl.fanout_prefixes {
@@ -421,7 +547,11 @@ fn build_auth_info(record: &UserRecord, acl: &AclConfig, ci: &ConnectInfo) -> Au
             });
         }
     }
-    AuthInfo { superuser: false, expire_at: None, rules }
+    AuthInfo {
+        superuser: false,
+        expire_at: None,
+        rules,
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -445,11 +575,11 @@ async fn fanout(state: &AppState, op: &ReplOp) {
     let mut set = tokio::task::JoinSet::new();
     for base in state.peers.iter() {
         let http = state.http.clone();
-        let token = state.token.clone();
+        let token = state.current_token();
         let url = format!("{base}/internal/replicate");
         let body = body.clone();
         set.spawn(async move {
-            match http.post(&url).bearer_auth(token.as_str()).json(&body).send().await {
+            match http.post(&url).bearer_auth(&token).json(&body).send().await {
                 Ok(r) if r.status().is_success() => {}
                 Ok(r) => log::warn!("replicate to {url} returned {}", r.status()),
                 Err(e) => log::warn!("replicate to {url} failed: {e}"),
@@ -501,7 +631,13 @@ pub async fn catch_up(state: AppState) {
     for _ in 0..30 {
         for base in state.peers.iter() {
             let url = format!("{base}/internal/users-full");
-            if let Ok(resp) = state.http.get(&url).bearer_auth(state.token.as_str()).send().await {
+            if let Ok(resp) = state
+                .http
+                .get(&url)
+                .bearer_auth(state.current_token())
+                .send()
+                .await
+            {
                 if resp.status().is_success() {
                     if let Ok(users) = resp.json::<Vec<UserRecord>>().await {
                         let users: Vec<NewUser> = users
@@ -553,5 +689,9 @@ fn bad_request(msg: &str) -> Response {
 
 fn internal_error(e: anyhow::Error) -> Response {
     log::error!("internal error: {e:#}");
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal error"}))).into_response()
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": "internal error"})),
+    )
+        .into_response()
 }

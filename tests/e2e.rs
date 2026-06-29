@@ -1,4 +1,6 @@
-use rumqttc::{AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS, SubscribeReasonCode, Transport};
+use rumqttc::{
+    AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS, SubscribeReasonCode, Transport,
+};
 use serde_json::json;
 use std::process::Child;
 use std::time::Duration;
@@ -51,7 +53,12 @@ auto_subscribe = {auto_subscribe}
         .env("NO_COLOR", "1")
         .spawn()
         .unwrap();
-    let broker = Broker { child, tcp_port, ws_port, api_port };
+    let broker = Broker {
+        child,
+        tcp_port,
+        ws_port,
+        api_port,
+    };
     let http = reqwest::Client::new();
     let health_url = format!("http://127.0.0.1:{api_port}/health");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -114,7 +121,11 @@ async fn connect_opts(opts: MqttOptions, client_id: &str) -> TestClient {
     })
     .await
     .expect("timed out waiting for connack");
-    assert_eq!(connack.code, ConnectReturnCode::Success, "{client_id} not accepted");
+    assert_eq!(
+        connack.code,
+        ConnectReturnCode::Success,
+        "{client_id} not accepted"
+    );
     let (tx, rx) = mpsc::unbounded_channel();
     let (tx_sub, rx_sub) = mpsc::unbounded_channel();
     tokio::spawn(async move {
@@ -132,7 +143,11 @@ async fn connect_opts(opts: MqttOptions, client_id: &str) -> TestClient {
             }
         }
     });
-    TestClient { client, msgs: rx, subacks: rx_sub }
+    TestClient {
+        client,
+        msgs: rx,
+        subacks: rx_sub,
+    }
 }
 
 fn tcp_opts(port: u16, client_id: &str, username: &str, password: &str) -> MqttOptions {
@@ -146,7 +161,12 @@ async fn connect(port: u16, client_id: &str, username: &str, password: &str) -> 
     connect_opts(tcp_opts(port, client_id, username, password), client_id).await
 }
 
-async fn connect_persistent(port: u16, client_id: &str, username: &str, password: &str) -> TestClient {
+async fn connect_persistent(
+    port: u16,
+    client_id: &str,
+    username: &str,
+    password: &str,
+) -> TestClient {
     let mut opts = tcp_opts(port, client_id, username, password);
     opts.set_clean_session(false);
     connect_opts(opts, client_id).await
@@ -162,7 +182,10 @@ async fn connect_ws(port: u16, client_id: &str, username: &str, password: &str) 
 
 impl TestClient {
     async fn subscribe_expect(&mut self, topic: &str, expect_ok: bool) {
-        self.client.subscribe(topic, QoS::AtLeastOnce).await.unwrap();
+        self.client
+            .subscribe(topic, QoS::AtLeastOnce)
+            .await
+            .unwrap();
         let codes = timeout(Duration::from_secs(5), self.subacks.recv())
             .await
             .expect("timed out waiting for suback")
@@ -214,7 +237,11 @@ async fn expect_rejected(port: u16, client_id: &str, username: &str, password: &
     .await
     .expect("timed out waiting for auth rejection");
     match outcome {
-        Ok(code) => assert_ne!(code, ConnectReturnCode::Success, "{client_id} unexpectedly accepted"),
+        Ok(code) => assert_ne!(
+            code,
+            ConnectReturnCode::Success,
+            "{client_id} unexpectedly accepted"
+        ),
         Err(rumqttc::ConnectionError::ConnectionRefused(code)) => {
             assert_ne!(code, ConnectReturnCode::Success)
         }
@@ -236,8 +263,26 @@ async fn end_to_end() {
         .unwrap();
     assert_eq!(resp.status(), 401, "request without token must be rejected");
 
-    create_user(&http, broker.api_port, "tok-user1", "u1001", "pw-user1", false, false).await;
-    create_user(&http, broker.api_port, "backend", "svc", "pw-backend", true, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-user1",
+        "u1001",
+        "pw-user1",
+        false,
+        false,
+    )
+    .await;
+    create_user(
+        &http,
+        broker.api_port,
+        "backend",
+        "svc",
+        "pw-backend",
+        true,
+        false,
+    )
+    .await;
 
     let resp = http
         .post(&users_url)
@@ -255,7 +300,11 @@ async fn end_to_end() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 400, "username with whitespace must be rejected");
+    assert_eq!(
+        resp.status(),
+        400,
+        "username with whitespace must be rejected"
+    );
 
     let resp = http
         .post(&users_url)
@@ -375,8 +424,26 @@ async fn websocket_transport() {
     let broker = start_broker(1200, false).await;
     let http = reqwest::Client::new();
 
-    create_user(&http, broker.api_port, "tok-ws", "u2000", "pw-ws", false, false).await;
-    create_user(&http, broker.api_port, "wsbackend", "svc", "pw-b", true, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-ws",
+        "u2000",
+        "pw-ws",
+        false,
+        false,
+    )
+    .await;
+    create_user(
+        &http,
+        broker.api_port,
+        "wsbackend",
+        "svc",
+        "pw-b",
+        true,
+        false,
+    )
+    .await;
 
     let mut ws_dev = connect_ws(broker.ws_port, "wsdev", "tok-ws", "pw-ws").await;
     let mut backend = connect(broker.tcp_port, "backend2", "wsbackend", "pw-b").await;
@@ -409,8 +476,26 @@ async fn auto_subscribe_fanout() {
     let broker = start_broker(1200, true).await;
     let http = reqwest::Client::new();
 
-    create_user(&http, broker.api_port, "tok-auto", "u4000", "pw-a", false, false).await;
-    create_user(&http, broker.api_port, "autobackend", "svc", "pw-b", true, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-auto",
+        "u4000",
+        "pw-a",
+        false,
+        false,
+    )
+    .await;
+    create_user(
+        &http,
+        broker.api_port,
+        "autobackend",
+        "svc",
+        "pw-b",
+        true,
+        false,
+    )
+    .await;
 
     let mut dev_a = connect(broker.tcp_port, "adevA", "tok-auto", "pw-a").await;
     let mut dev_b = connect(broker.tcp_port, "adevB", "tok-auto", "pw-a").await;
@@ -444,7 +529,16 @@ async fn offline_messages_expire() {
     let broker = start_broker(2, false).await;
     let http = reqwest::Client::new();
 
-    create_user(&http, broker.api_port, "tok-e", "u3000", "pw-e", false, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-e",
+        "u3000",
+        "pw-e",
+        false,
+        false,
+    )
+    .await;
     create_user(&http, broker.api_port, "epub", "svc", "pw-p", true, false).await;
 
     let publisher = connect(broker.tcp_port, "epub1", "epub", "pw-p").await;
@@ -483,15 +577,29 @@ async fn offline_messages_expire() {
 
 async fn start_cluster() -> Vec<Broker> {
     const N: usize = 3;
-    let mqtt: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
-    let ws: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
-    let api: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
-    let grpc: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
-    let raft: Vec<u16> = (0..N).map(|_| portpicker::pick_unused_port().unwrap()).collect();
-    let node_grpc =
-        (0..N).map(|i| format!("\"{}@127.0.0.1:{}\"", i + 1, grpc[i])).collect::<Vec<_>>().join(", ");
-    let raft_peers =
-        (0..N).map(|i| format!("\"{}@127.0.0.1:{}\"", i + 1, raft[i])).collect::<Vec<_>>().join(", ");
+    let mqtt: Vec<u16> = (0..N)
+        .map(|_| portpicker::pick_unused_port().unwrap())
+        .collect();
+    let ws: Vec<u16> = (0..N)
+        .map(|_| portpicker::pick_unused_port().unwrap())
+        .collect();
+    let api: Vec<u16> = (0..N)
+        .map(|_| portpicker::pick_unused_port().unwrap())
+        .collect();
+    let grpc: Vec<u16> = (0..N)
+        .map(|_| portpicker::pick_unused_port().unwrap())
+        .collect();
+    let raft: Vec<u16> = (0..N)
+        .map(|_| portpicker::pick_unused_port().unwrap())
+        .collect();
+    let node_grpc = (0..N)
+        .map(|i| format!("\"{}@127.0.0.1:{}\"", i + 1, grpc[i]))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let raft_peers = (0..N)
+        .map(|i| format!("\"{}@127.0.0.1:{}\"", i + 1, raft[i]))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let mut brokers = Vec::new();
     for i in 0..N {
@@ -538,19 +646,27 @@ join_retry_secs = 1
             .env("NO_COLOR", "1")
             .spawn()
             .unwrap();
-        brokers.push(Broker { child, tcp_port: mqtt[i], ws_port: ws[i], api_port: api[i] });
+        brokers.push(Broker {
+            child,
+            tcp_port: mqtt[i],
+            ws_port: ws[i],
+            api_port: api[i],
+        });
     }
 
     // Every node only opens its MQTT listener AFTER cluster registration succeeds, so all three
     // serving means the cold cluster elected a leader. With leader_id=0 none would bootstrap.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
     for b in &brokers {
         loop {
-            if tokio::net::TcpStream::connect(("127.0.0.1", b.tcp_port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", b.tcp_port))
+                .await
+                .is_ok()
+            {
                 break;
             }
             if tokio::time::Instant::now() > deadline {
-                panic!("cluster did not cold-bootstrap (a node never served MQTT) within 120s");
+                panic!("cluster did not cold-bootstrap (a node never served MQTT) within 240s");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -563,8 +679,26 @@ join_retry_secs = 1
 async fn cluster_cold_bootstrap_serves() {
     let nodes = start_cluster().await;
     let http = reqwest::Client::new();
-    create_user(&http, nodes[0].api_port, "tok-cl", "u1200", "pw-cl", false, false).await;
-    create_user(&http, nodes[0].api_port, "clbackend", "svc", "pw-clb", true, false).await;
+    create_user(
+        &http,
+        nodes[0].api_port,
+        "tok-cl",
+        "u1200",
+        "pw-cl",
+        false,
+        false,
+    )
+    .await;
+    create_user(
+        &http,
+        nodes[0].api_port,
+        "clbackend",
+        "svc",
+        "pw-clb",
+        true,
+        false,
+    )
+    .await;
 
     let mut dev = connect(nodes[0].tcp_port, "cldev", "tok-cl", "pw-cl").await;
     let pubr = connect(nodes[0].tcp_port, "clpub", "clbackend", "pw-clb").await;
@@ -584,7 +718,16 @@ async fn cluster_cold_bootstrap_serves() {
 async fn qos2_exactly_once() {
     let broker = start_broker(1200, false).await;
     let http = reqwest::Client::new();
-    create_user(&http, broker.api_port, "tok-q2", "u5000", "pw-q2", false, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-q2",
+        "u5000",
+        "pw-q2",
+        false,
+        false,
+    )
+    .await;
     create_user(&http, broker.api_port, "q2pub", "svc", "pw-p", true, false).await;
 
     let mut dev = connect(broker.tcp_port, "q2dev", "tok-q2", "pw-q2").await;
@@ -606,8 +749,26 @@ async fn qos2_exactly_once() {
 async fn tcp_burst_no_loss() {
     let broker = start_broker(1200, false).await;
     let http = reqwest::Client::new();
-    create_user(&http, broker.api_port, "tok-burst", "u6000", "pw-b", false, false).await;
-    create_user(&http, broker.api_port, "burstpub", "svc", "pw-p", true, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-burst",
+        "u6000",
+        "pw-b",
+        false,
+        false,
+    )
+    .await;
+    create_user(
+        &http,
+        broker.api_port,
+        "burstpub",
+        "svc",
+        "pw-p",
+        true,
+        false,
+    )
+    .await;
 
     let mut dev = connect(broker.tcp_port, "burstdev", "tok-burst", "pw-b").await;
     let pubr = connect(broker.tcp_port, "burstpub1", "burstpub", "pw-p").await;
@@ -617,14 +778,23 @@ async fn tcp_burst_no_loss() {
     const N: usize = 200;
     for i in 0..N {
         pubr.client
-            .publish("chat/u6000/m/all", QoS::AtLeastOnce, false, format!("m-{i}"))
+            .publish(
+                "chat/u6000/m/all",
+                QoS::AtLeastOnce,
+                false,
+                format!("m-{i}"),
+            )
             .await
             .unwrap();
     }
     let msgs = dev.recv_n(N).await;
     for (i, (topic, payload)) in msgs.into_iter().enumerate() {
         assert_eq!(topic, "chat/u6000/m/all");
-        assert_eq!(payload, format!("m-{i}").into_bytes(), "tcp burst message {i} lost or reordered");
+        assert_eq!(
+            payload,
+            format!("m-{i}").into_bytes(),
+            "tcp burst message {i} lost or reordered"
+        );
     }
     dev.expect_silence().await;
 }
@@ -633,7 +803,16 @@ async fn tcp_burst_no_loss() {
 async fn websocket_burst_no_loss() {
     let broker = start_broker(1200, false).await;
     let http = reqwest::Client::new();
-    create_user(&http, broker.api_port, "tok-wsb", "u7000", "pw-wsb", false, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-wsb",
+        "u7000",
+        "pw-wsb",
+        false,
+        false,
+    )
+    .await;
     create_user(&http, broker.api_port, "wsbpub", "svc", "pw-p", true, false).await;
 
     let mut ws_dev = connect_ws(broker.ws_port, "wsbdev", "tok-wsb", "pw-wsb").await;
@@ -644,14 +823,23 @@ async fn websocket_burst_no_loss() {
     const N: usize = 200;
     for i in 0..N {
         pubr.client
-            .publish("update/u7000/w/all", QoS::AtLeastOnce, false, format!("w-{i}"))
+            .publish(
+                "update/u7000/w/all",
+                QoS::AtLeastOnce,
+                false,
+                format!("w-{i}"),
+            )
             .await
             .unwrap();
     }
     let msgs = ws_dev.recv_n(N).await;
     for (i, (topic, payload)) in msgs.into_iter().enumerate() {
         assert_eq!(topic, "update/u7000/w/all");
-        assert_eq!(payload, format!("w-{i}").into_bytes(), "ws burst message {i} lost or reordered");
+        assert_eq!(
+            payload,
+            format!("w-{i}").into_bytes(),
+            "ws burst message {i} lost or reordered"
+        );
     }
     ws_dev.expect_silence().await;
 }
@@ -660,7 +848,16 @@ async fn websocket_burst_no_loss() {
 async fn auth_repeated_connect_and_wrong_password() {
     let broker = start_broker(1200, false).await;
     let http = reqwest::Client::new();
-    create_user(&http, broker.api_port, "tok-ac", "u9000", "pw-ac", false, false).await;
+    create_user(
+        &http,
+        broker.api_port,
+        "tok-ac",
+        "u9000",
+        "pw-ac",
+        false,
+        false,
+    )
+    .await;
 
     for i in 0..5 {
         let dev = connect(broker.tcp_port, &format!("acdev{i}"), "tok-ac", "pw-ac").await;

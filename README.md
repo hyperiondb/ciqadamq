@@ -11,6 +11,7 @@ Status: **in production**
 - Username/password auth
 - Per-user topic ACL mirroring the RabbitMQ permission regexes
 - REST API to create/delete users (bearer token)
+- Secrets from [hyperion-vault](https://github.com/hyperiondb/hyperion-vault): fetches its REST API token and auth pepper from the vault at startup; the token refreshes on an auth-miss, the pepper is static; env fallback; set `VAULT_ADDR`
 - Messages queued for offline persistent sessions expire after 20 minutes (configurable)
 - No TLS — run behind HAProxy
 - Configurable auth, message persistence
@@ -57,7 +58,7 @@ Fanout works exactly like the RabbitMQ setup: one publish to `chat/{userid}/m/al
 
 ## REST API
 
-`Authorization: Bearer <token>` (config `api.token` / env `API_TOKEN`). Any node of the cluster can serve these.
+`Authorization: Bearer <token>` (from the hyperion-vault secret `ciqada/api-token` when `VAULT_ADDR` is set, else config `api.token` / env `API_TOKEN`). Any node of the cluster can serve these.
 
 | Method | Path | Body |
 |---|---|---|

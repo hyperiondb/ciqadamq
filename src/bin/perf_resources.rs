@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rumqttc::{AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet, QoS};
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -49,13 +49,20 @@ fn load_settings() -> Result<Settings> {
     let nodes = env_or("PERF_NODES", "127.0.0.1:1883,127.0.0.1:1884,127.0.0.1:1885")
         .split(',')
         .map(|s| {
-            let (h, p) = s.trim().rsplit_once(':').ok_or_else(|| anyhow!("bad node addr: {s}"))?;
+            let (h, p) = s
+                .trim()
+                .rsplit_once(':')
+                .ok_or_else(|| anyhow!("bad node addr: {s}"))?;
             Ok((h.to_string(), p.parse::<u16>()?))
         })
         .collect::<Result<Vec<_>>>()?;
     let mut sub_levels = env_or("PERF_RES_SUBS", "0,1000,2500,5000")
         .split(',')
-        .map(|s| s.trim().parse::<usize>().context("PERF_RES_SUBS must be integers"))
+        .map(|s| {
+            s.trim()
+                .parse::<usize>()
+                .context("PERF_RES_SUBS must be integers")
+        })
         .collect::<Result<Vec<_>>>()?;
     sub_levels.sort_unstable();
     sub_levels.dedup();
@@ -79,7 +86,10 @@ fn load_settings() -> Result<Settings> {
 }
 
 fn now_nanos() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 async fn create_user(
@@ -138,7 +148,9 @@ async fn connect_subscriber(
                 }
                 tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
             }
-            Err(e) => return Err(e.context(format!("{client_id} gave up after {max_attempts} attempts"))),
+            Err(e) => {
+                return Err(e.context(format!("{client_id} gave up after {max_attempts} attempts")));
+            }
         }
     }
     unreachable!()
@@ -184,7 +196,10 @@ async fn finish_subscriber(
         loop {
             match eventloop.poll().await {
                 Ok(Event::Incoming(Packet::SubAck(ack))) => {
-                    if matches!(ack.return_codes.first(), Some(rumqttc::SubscribeReasonCode::Success(_))) {
+                    if matches!(
+                        ack.return_codes.first(),
+                        Some(rumqttc::SubscribeReasonCode::Success(_))
+                    ) {
                         return Ok(());
                     }
                     return Err(anyhow!("{client_id} subscribe denied"));
@@ -208,7 +223,10 @@ async fn finish_subscriber(
             }
         }
     });
-    Ok(Subscriber { client, topic: topic.to_string() })
+    Ok(Subscriber {
+        client,
+        topic: topic.to_string(),
+    })
 }
 
 fn spawn_publishers(
@@ -233,7 +251,11 @@ fn spawn_publishers(
                     if !running.load(Ordering::Relaxed) {
                         break;
                     }
-                    if client.publish(topic.clone(), qos, false, payload.as_ref().clone()).await.is_err() {
+                    if client
+                        .publish(topic.clone(), qos, false, payload.as_ref().clone())
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -257,9 +279,17 @@ async fn resolve_containers(services: &[String]) -> Result<Vec<String>> {
             .await
             .context("running docker ps")?;
         if !out.status.success() {
-            return Err(anyhow!("docker ps failed: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(anyhow!(
+                "docker ps failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
-        let id = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string();
+        let id = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if id.is_empty() {
             return Err(anyhow!("no running container for compose service {svc}"));
         }
@@ -286,13 +316,21 @@ fn parse_mem_mb(s: &str) -> Result<f64> {
 
 async fn sample_stats(ids: &[String]) -> Result<Vec<(f64, f64)>> {
     let out = Command::new("docker")
-        .args(["stats", "--no-stream", "--format", "{{.ID}};{{.CPUPerc}};{{.MemUsage}}"])
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.ID}};{{.CPUPerc}};{{.MemUsage}}",
+        ])
         .args(ids)
         .output()
         .await
         .context("running docker stats")?;
     if !out.status.success() {
-        return Err(anyhow!("docker stats failed: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(anyhow!(
+            "docker stats failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut by_id: HashMap<String, (f64, f64)> = HashMap::new();
@@ -301,7 +339,11 @@ async fn sample_stats(ids: &[String]) -> Result<Vec<(f64, f64)>> {
         if parts.len() != 3 {
             continue;
         }
-        let cpu = parts[1].trim().trim_end_matches('%').parse::<f64>().unwrap_or(0.0);
+        let cpu = parts[1]
+            .trim()
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .unwrap_or(0.0);
         let mem = parse_mem_mb(parts[2].split('/').next().unwrap_or("").trim())?;
         by_id.insert(parts[0].trim().to_string(), (cpu, mem));
     }
@@ -335,8 +377,14 @@ async fn measure_level(
         }
     }
     let elapsed = win_start.elapsed().as_secs_f64();
-    let delivered_delta = delivered.load(Ordering::Relaxed).saturating_sub(delivered_start);
-    let msg_per_sec = if elapsed > 0.0 { delivered_delta as f64 / elapsed } else { 0.0 };
+    let delivered_delta = delivered
+        .load(Ordering::Relaxed)
+        .saturating_sub(delivered_start);
+    let msg_per_sec = if elapsed > 0.0 {
+        delivered_delta as f64 / elapsed
+    } else {
+        0.0
+    };
     let cpu_pct: Vec<f64> = cpu_sum.iter().map(|v| v / s.samples as f64).collect();
     let mem_mb: Vec<f64> = mem_sum.iter().map(|v| v / s.samples as f64).collect();
     Ok(LevelResult {
@@ -381,7 +429,11 @@ async fn main() -> Result<()> {
     let run_id = format!("{:x}", now_nanos() / 1_000_000);
 
     let scenarios = [
-        Scenario { tag: "idle", label: "idle subscribers".to_string(), qos: None },
+        Scenario {
+            tag: "idle",
+            label: "idle subscribers".to_string(),
+            qos: None,
+        },
         Scenario {
             tag: "qos1",
             label: format!("subscribers sending {} msg/s qos1", s.msg_rate),
@@ -395,7 +447,11 @@ async fn main() -> Result<()> {
     ];
 
     let max_subs = *s.sub_levels.iter().max().unwrap_or(&0);
-    let max_users = if max_subs == 0 { 0 } else { (max_subs + s.devices_per_user - 1) / s.devices_per_user };
+    let max_users = if max_subs == 0 {
+        0
+    } else {
+        (max_subs + s.devices_per_user - 1) / s.devices_per_user
+    };
     println!("run {run_id}: provisioning {max_users} users");
     let t0 = Instant::now();
     let sem = Arc::new(Semaphore::new(32));
@@ -407,7 +463,13 @@ async fn main() -> Result<()> {
         let sem = sem.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
-            create_user(&http, &s, &format!("tok-{run_id}-{i}"), &format!("uid-{run_id}-{i}")).await
+            create_user(
+                &http,
+                &s,
+                &format!("tok-{run_id}-{i}"),
+                &format!("uid-{run_id}-{i}"),
+            )
+            .await
         }));
     }
     for h in handles {
@@ -449,10 +511,19 @@ async fn main() -> Result<()> {
                 .map(|(svc, (c, m))| format!("{svc} {c:.1}%/{m:.0}MB"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let cpu_per_1k = if r.msg_per_sec > 0.0 { r.cpu_total_pct * 1000.0 / r.msg_per_sec } else { 0.0 };
+            let cpu_per_1k = if r.msg_per_sec > 0.0 {
+                r.cpu_total_pct * 1000.0 / r.msg_per_sec
+            } else {
+                0.0
+            };
             println!(
                 "  [{}] {} subscribers -> cpu {:.1}% mem {:.1} MB, {:.0} msg/s, {:.2} cpu%/1k msgs ({per_node})",
-                scenario.tag, r.subscribers, r.cpu_total_pct, r.mem_total_mb, r.msg_per_sec, cpu_per_1k
+                scenario.tag,
+                r.subscribers,
+                r.cpu_total_pct,
+                r.mem_total_mb,
+                r.msg_per_sec,
+                cpu_per_1k
             );
             results[si].push(r);
         }
@@ -496,12 +567,29 @@ async fn main() -> Result<()> {
             for i in 0..s.services.len() {
                 csv.push_str(&format!(",{:.2},{:.2}", r.cpu_pct[i], r.mem_mb[i]));
             }
-            let cpu_per_1k = if r.msg_per_sec > 0.0 { r.cpu_total_pct * 1000.0 / r.msg_per_sec } else { 0.0 };
-            let cpu_per_1k_users = if r.subscribers > 0 { r.cpu_total_pct / (r.subscribers as f64 / 1000.0) } else { 0.0 };
-            let mem_per_1k_users = if r.subscribers > 0 { r.mem_total_mb / (r.subscribers as f64 / 1000.0) } else { 0.0 };
+            let cpu_per_1k = if r.msg_per_sec > 0.0 {
+                r.cpu_total_pct * 1000.0 / r.msg_per_sec
+            } else {
+                0.0
+            };
+            let cpu_per_1k_users = if r.subscribers > 0 {
+                r.cpu_total_pct / (r.subscribers as f64 / 1000.0)
+            } else {
+                0.0
+            };
+            let mem_per_1k_users = if r.subscribers > 0 {
+                r.mem_total_mb / (r.subscribers as f64 / 1000.0)
+            } else {
+                0.0
+            };
             csv.push_str(&format!(
                 ",{:.2},{:.2},{:.0},{:.2},{:.2},{:.2}\n",
-                r.cpu_total_pct, r.mem_total_mb, r.msg_per_sec, cpu_per_1k, cpu_per_1k_users, mem_per_1k_users
+                r.cpu_total_pct,
+                r.mem_total_mb,
+                r.msg_per_sec,
+                cpu_per_1k,
+                cpu_per_1k_users,
+                mem_per_1k_users
             ));
         }
         let peruser_path = svg_path.replace(".svg", "-peruser.svg");
@@ -514,42 +602,76 @@ async fn main() -> Result<()> {
 }
 
 fn render_svg(services: &[String], results: &[LevelResult], label: &str) -> String {
-    let node_colors = ["#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2"];
+    let node_colors = [
+        "#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b", "#e377c2",
+    ];
     let mut cpu_series: Vec<(String, &str, Vec<f64>)> = Vec::new();
     let mut mem_series: Vec<(String, &str, Vec<f64>)> = Vec::new();
     for (i, svc) in services.iter().enumerate() {
         let color = node_colors[i % node_colors.len()];
-        cpu_series.push((svc.clone(), color, results.iter().map(|r| r.cpu_pct[i]).collect()));
-        mem_series.push((svc.clone(), color, results.iter().map(|r| r.mem_mb[i]).collect()));
+        cpu_series.push((
+            svc.clone(),
+            color,
+            results.iter().map(|r| r.cpu_pct[i]).collect(),
+        ));
+        mem_series.push((
+            svc.clone(),
+            color,
+            results.iter().map(|r| r.mem_mb[i]).collect(),
+        ));
     }
-    cpu_series.push(("total".into(), "#d62728", results.iter().map(|r| r.cpu_total_pct).collect()));
-    mem_series.push(("total".into(), "#d62728", results.iter().map(|r| r.mem_total_mb).collect()));
+    cpu_series.push((
+        "total".into(),
+        "#d62728",
+        results.iter().map(|r| r.cpu_total_pct).collect(),
+    ));
+    mem_series.push((
+        "total".into(),
+        "#d62728",
+        results.iter().map(|r| r.mem_total_mb).collect(),
+    ));
 
     let xs: Vec<f64> = results.iter().map(|r| r.subscribers as f64).collect();
     let cpu_title = format!("broker cpu usage on {label} (%, docker stats)");
     let mem_title = format!("broker memory usage on {label} (MB)");
-    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] =
-        [(cpu_title.as_str(), &cpu_series), (mem_title.as_str(), &mem_series)];
+    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] = [
+        (cpu_title.as_str(), &cpu_series),
+        (mem_title.as_str(), &mem_series),
+    ];
     render_panels(&panels, &xs)
 }
 
 fn render_peruser_svg(results: &[LevelResult], label: &str) -> String {
-    let per_msg = |total: f64, msg_per_sec: f64| if msg_per_sec > 0.0 { total * 1000.0 / msg_per_sec } else { 0.0 };
+    let per_msg = |total: f64, msg_per_sec: f64| {
+        if msg_per_sec > 0.0 {
+            total * 1000.0 / msg_per_sec
+        } else {
+            0.0
+        }
+    };
     let cpu_series: Vec<(String, &str, Vec<f64>)> = vec![(
         "cpu%/1k msgs".into(),
         "#1f77b4",
-        results.iter().map(|r| per_msg(r.cpu_total_pct, r.msg_per_sec)).collect(),
+        results
+            .iter()
+            .map(|r| per_msg(r.cpu_total_pct, r.msg_per_sec))
+            .collect(),
     )];
     let mem_series: Vec<(String, &str, Vec<f64>)> = vec![(
         "MB/1k msgs".into(),
         "#2ca02c",
-        results.iter().map(|r| per_msg(r.mem_total_mb, r.msg_per_sec)).collect(),
+        results
+            .iter()
+            .map(|r| per_msg(r.mem_total_mb, r.msg_per_sec))
+            .collect(),
     )];
     let xs: Vec<f64> = results.iter().map(|r| r.subscribers as f64).collect();
     let cpu_title = format!("broker cpu per 1k msgs on {label} (%)");
     let mem_title = format!("broker memory per 1k msgs on {label} (MB)");
-    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] =
-        [(cpu_title.as_str(), &cpu_series), (mem_title.as_str(), &mem_series)];
+    let panels: [(&str, &Vec<(String, &str, Vec<f64>)>); 2] = [
+        (cpu_title.as_str(), &cpu_series),
+        (mem_title.as_str(), &mem_series),
+    ];
     render_panels(&panels, &xs)
 }
 
@@ -592,7 +714,9 @@ fn render_panels(panels: &[(&str, &Vec<(String, &str, Vec<f64>)>)], xs: &[f64]) 
             r#"<line x1="{ml}" y1="{bottom}" x2="{}" y2="{bottom}" stroke="black"/>"#,
             ml + plot_w
         ));
-        svg.push_str(&format!(r#"<line x1="{ml}" y1="{top}" x2="{ml}" y2="{bottom}" stroke="black"/>"#));
+        svg.push_str(&format!(
+            r#"<line x1="{ml}" y1="{top}" x2="{ml}" y2="{bottom}" stroke="black"/>"#
+        ));
 
         for t in 0..=5 {
             let yv = y_max / 5.0 * t as f64;
@@ -623,8 +747,11 @@ fn render_panels(panels: &[(&str, &Vec<(String, &str, Vec<f64>)>)], xs: &[f64]) 
         ));
 
         for (si, (label, color, vals)) in series.iter().enumerate() {
-            let points: Vec<String> =
-                xs.iter().zip(vals.iter()).map(|(x, v)| format!("{:.1},{:.1}", x_pos(*x), y_pos(*v))).collect();
+            let points: Vec<String> = xs
+                .iter()
+                .zip(vals.iter())
+                .map(|(x, v)| format!("{:.1},{:.1}", x_pos(*x), y_pos(*v)))
+                .collect();
             svg.push_str(&format!(
                 r#"<polyline points="{}" fill="none" stroke="{color}" stroke-width="2"/>"#,
                 points.join(" ")
@@ -638,8 +765,14 @@ fn render_panels(panels: &[(&str, &Vec<(String, &str, Vec<f64>)>)], xs: &[f64]) 
             }
             let lx = ml + 12.0;
             let ly = top + 16.0 + si as f64 * 18.0;
-            svg.push_str(&format!(r#"<rect x="{lx}" y="{}" width="12" height="12" fill="{color}"/>"#, ly - 10.0));
-            svg.push_str(&format!(r#"<text x="{}" y="{ly}">{label}</text>"#, lx + 18.0));
+            svg.push_str(&format!(
+                r#"<rect x="{lx}" y="{}" width="12" height="12" fill="{color}"/>"#,
+                ly - 10.0
+            ));
+            svg.push_str(&format!(
+                r#"<text x="{}" y="{ly}">{label}</text>"#,
+                lx + 18.0
+            ));
         }
     }
     svg.push_str("</svg>");

@@ -1,10 +1,10 @@
 use crate::config::{AclConfig, FanoutConfig};
 use crate::db::UserStore;
 use async_trait::async_trait;
+use rmqtt::Result;
 use rmqtt::codec::v5::{RetainHandling, SubscriptionOptions};
 use rmqtt::subscribe::AutoSubscription;
 use rmqtt::types::{Id, QoS, Subscribe, TopicFilter};
-use rmqtt::Result;
 use std::sync::Arc;
 
 pub struct UseridAutoSubscription {
