@@ -1,0 +1,49 @@
+[package]
+name = "ciqadamq-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+# Deps to compile the #[path]-included src/db.rs. Pinned to match the broker so
+# the included source builds identically. No rmqtt/axum/tokio-full — fuzz builds
+# stay light and need no protoc.
+anyhow = "1"
+argon2 = "0.5.3"
+# OsRng (db.rs hash_password) is gated behind rand_core/getrandom; the broker's
+# full tree unifies it on, the smaller fuzz tree must enable it explicitly.
+rand_core = { version = "0.6", features = ["getrandom"] }
+async-trait = "0.1"
+hmac = "0.13.0"
+redb = "4.1.0"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11.0"
+bincode = { version = "2.0.1", features = ["serde"] }
+tokio = { version = "1", features = ["rt"] }
+
+# Detached workspace so `cargo build/test` and the stable-pinned CI never try to
+# compile this nightly-only crate.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "topic_match"
+path = "fuzz_targets/topic_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_verify"
+path = "fuzz_targets/auth_verify.rs"
+test = false
+doc = false
+bench = false

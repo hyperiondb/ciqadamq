@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod fanout;
 mod msgstore;
+mod topic;
 mod vault;
 
 use anyhow::Result;

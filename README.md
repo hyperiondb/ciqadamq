@@ -90,6 +90,13 @@ cargo test                        # local single-broker e2e (auth, ACL, fanout, 
 scripts\cluster-e2e.ps1           # compose up -> cross-node e2e -> compose down (KEEP_CLUSTER=1 to keep it)
 ```
 
+Fuzz tests (nightly + [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); bounded so they exit, no `protoc`/rmqtt needed — they compile only the pure functions):
+
+```
+cargo +nightly fuzz run topic_match -- -max_total_time=60   # MQTT topic/filter wildcard matching
+cargo +nightly fuzz run auth_verify -- -max_total_time=60   # argon2 PHC parse + HMAC fast-verifier
+```
+
 ## Performance tests
 
 Note. 100% cpu = 1 core. 256 bytes payload.

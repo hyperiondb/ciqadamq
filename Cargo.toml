@@ -1,6 +1,6 @@
 [package]
 name = "ciqadamq"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Clustered MQTT broker built on RMQTT with a REST API for user management, per-user topic ACLs, and message expiry"
 authors = ["Tadas Talaikis <info@nordlet.com>"]
@@ -21,6 +21,7 @@ exclude = [
     "perf-resources.*",
     "performance.png",
     "data/",
+    "fuzz/",
 ]
 
 [features]

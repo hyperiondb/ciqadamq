@@ -1,3 +1,4 @@
+use crate::topic::{has_wildcard, topic_matches};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -250,24 +251,6 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
-}
-
-fn topic_matches(topic: &str, filter: &str) -> bool {
-    let mut t = topic.split('/');
-    let mut f = filter.split('/');
-    loop {
-        match (f.next(), t.next()) {
-            (Some("#"), _) => return true,
-            (Some("+"), Some(_)) => continue,
-            (Some(fseg), Some(tseg)) if fseg == tseg => continue,
-            (None, None) => return true,
-            _ => return false,
-        }
-    }
-}
-
-fn has_wildcard(filter: &str) -> bool {
-    filter.bytes().any(|b| b == b'+' || b == b'#')
 }
 
 #[async_trait]
