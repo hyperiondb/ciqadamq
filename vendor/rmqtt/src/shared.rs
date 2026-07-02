@@ -723,7 +723,7 @@ impl Shared for DefaultShared {
             let (tx, to) = if let Some((tx, to)) = self.tx(&client_id) {
                 (tx, to)
             } else {
-                log::debug!(
+                log::warn!(
                     "forwards_to failed, from:{:?}, to:{:?}, topic_filter:{:?}, topic:{:?}, reason: the client has disconnected.",
                     from,
                     client_id,

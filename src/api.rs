@@ -373,8 +373,26 @@ pub async fn register_auth_hooks(scx: &ServerContext, state: AppState) -> Box<dy
     register
         .add(Type::MessagePublishCheckAcl, Box::new(MqttAuth { state }))
         .await;
+    register.add(Type::MessageDropped, Box::new(DropLogger)).await;
     register.start().await;
     register
+}
+
+struct DropLogger;
+
+#[async_trait]
+impl Handler for DropLogger {
+    async fn hook(&self, param: &Parameter, acc: Option<HookResult>) -> ReturnType {
+        if let Parameter::MessageDropped(to, from, publish, reason) = param {
+            log::warn!(
+                "message dropped, to: {}, from: {}, topic: {:?}, reason: {reason}",
+                to.as_ref().map(|t| t.to_string()).unwrap_or_default(),
+                from.id,
+                publish.topic
+            );
+        }
+        (true, acc)
+    }
 }
 
 struct MqttAuth {

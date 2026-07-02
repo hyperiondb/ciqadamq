@@ -270,21 +270,16 @@ impl MessageManager for RedbMessageStore {
         from: MsgFrom,
         p: Publish,
         expiry_interval: Duration,
-        sub_client_ids: Option<Vec<(ClientId, Option<(TopicFilter, SharedGroup)>)>>,
+        _sub_client_ids: Option<Vec<(ClientId, Option<(TopicFilter, SharedGroup)>)>>,
     ) -> RmqttResult<()> {
         let now = now_millis();
         let expiry_at = now.saturating_add(expiry_interval.as_millis() as i64);
-        let delivered_to: HashSet<String> = sub_client_ids
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(cid, _)| cid.to_string())
-            .collect();
         let key = msg_id as u64;
         let msg = StoredMsg {
             from,
             publish: p,
             expiry_at,
-            delivered_to,
+            delivered_to: HashSet::new(),
         };
         let _ = self.tx.send((key, msg));
         Ok(())
